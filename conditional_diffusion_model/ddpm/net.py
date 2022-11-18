@@ -175,7 +175,7 @@ class ConditionalUnet(nn.Module):
         self.down2 = UnetDown(in_channels=n_feats, out_channels=2 * n_feats)
 
         # compress into latent space
-        self.to_vec = nn.Sequential(nn.AvgPool2d(8), 
+        self.to_vec = nn.Sequential(nn.AvgPool2d(4), 
                                     nn.GELU())
 
         # embed t in diffusion step
@@ -191,7 +191,7 @@ class ConditionalUnet(nn.Module):
 
         self.up0 = nn.Sequential(
             # nn.ConvTranspose2d(6 * n_feat, 2 * n_feat, 5, 5), # when concat temb and cemb end up w 6*n_feat
-            nn.ConvTranspose2d(in_channels=2 * n_feats, out_channels=2 * n_feats, kernel_size=8, stride=8), # otherwise just have 2*n_feat
+            nn.ConvTranspose2d(in_channels=2 * n_feats, out_channels=2 * n_feats, kernel_size=4, stride=4), # otherwise just have 2*n_feat
             nn.GroupNorm(num_groups=8, num_channels=2 * n_feats),
             nn.ReLU(),
         )

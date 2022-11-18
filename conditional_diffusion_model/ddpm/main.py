@@ -1,6 +1,9 @@
 import argparse
 from typing import Optional
 import logging
+import sys
+
+sys.path.append('..')
 
 import torch
 import torch.nn as nn
@@ -14,15 +17,15 @@ from ddpm import DDPM
 logging.basicConfig(level=logging.DEBUG)
 
 parse = argparse.ArgumentParser()
-parse.add_argument('--data_path', type=str, default='../data/smoke/')
-parse.add_argument('--n_epochs', type=int, default=20)
-parse.add_argument('--batch_size', type=int, default=16)
-parse.add_argument('--lr', type=float, default=1e-4)
+parse.add_argument('--data_path', type=str, default='/media/bamf-big/gefan/DiffFluids/data/smoke/')
+parse.add_argument('--n_epochs', type=int, default=20, help='number of epochs, default: 20')
+parse.add_argument('--batch_size', type=int, default=16, help='batch size, default: 16 | suggested: 64 for small, 32 for medium, 16 for large')
+parse.add_argument('--lr', type=float, default=1e-4, help='learning rate, default: 1e-4')
 parse.add_argument('--multi_gpu', action='store_true', help='use multi-gpu for training')
 parse.add_argument('--local_rank', default=-1, type=int, help='node rank for distributed training')
 parse.add_argument('--save', action='store_true', help='save model')
-parse.add_argument('--save_path', type=str, default='./checkpoint/ddpmunet.pkl')
-parse.add_argument('--dataset', type=str, default='smoke1', help='dataset name')
+parse.add_argument('--save_path', type=str, default='/media/bamf-big/gefan/DiffFluids/checkpoint/')
+parse.add_argument('--dataset', type=str, default='smoke_small', help='dataset name, default smoke_small')
 
 args = parse.parse_args()
 
@@ -34,14 +37,14 @@ class Trainer:
     def __init__(self, 
                  model: nn.Module,
                  dataloader: torch.utils.data.DataLoader,
-                 log_path: str='./logs/',
+                 log_path: str='/media/bamf-big/gefan/DiffFluids',
                  load_path: Optional[str]=None,
                  device: str='cuda:1') -> None:
         self.model = model
         self.dataloader = dataloader
         self.load_path = load_path
         self.device = device
-        self.writer = SummaryWriter(log_dir=log_path, comment='DDPM_smoke1')
+        self.writer = SummaryWriter(log_dir=log_path, comment='DDPM_smoke_small')
 
     def train(self) -> None:
         self.model.train()
@@ -56,7 +59,7 @@ class Trainer:
             self.model.to(self.device)
             logging.info(f"Now using 1 GPU!")
             optimizer = torch.optim.Adam(self.model.net.parameters(), lr=args.lr)
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.5)
+        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.7)
 
         for ep in range(args.n_epochs):
 
@@ -82,14 +85,14 @@ class Trainer:
             scheduler.step()
         
         if args.save:
-            torch.save(self.model.net.state_dict(), args.save_path)
+            torch.save(self.model.net.state_dict(), args.save_path + "ddpm_" + args.dataset + ".pkl")
             logging.info(f"Model saved to {args.save_path}")
         self.writer.close()
 
 if __name__ == '__main__':
     device = 'cuda:1'
     dataset = MyDataSet(args.data_path + args.dataset + '.npz')
-    model = DDPM(in_channels=1, n_feats=256, betas=[1e-3, 0.02], n_T=400, device=device)
+    model = DDPM(in_channels=1, n_feats=256, betas=[1e-4, 0.02], n_T=500, device=device)
     logging.info(f"Dataset created, {len(dataset)} sample in total.")
     if args.multi_gpu:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset)    
