@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from net import ConditionalUnet
+from net import Unet
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -16,6 +16,7 @@ class DDPM(nn.Module):
                  betas: list, 
                  n_T: int, 
                  device: str,
+                 conditional: bool=True,
                  pretrained: Optional[str]=None) -> None:
         super(DDPM, self).__init__()
         """ DDPM model
@@ -27,7 +28,7 @@ class DDPM(nn.Module):
             n_T (int): diffusion steps
         """
 
-        self.net = ConditionalUnet(in_channels, n_feats)
+        self.net = Unet(in_channels, n_feats, conditional)
         if pretrained:
             self.net.load_state_dict(torch.load(pretrained))
             logging.info(f"Load pretrained model from {pretrained}")
@@ -76,7 +77,7 @@ class DDPM(nn.Module):
 
         Args:
             x (torch.Tensor): (B, 1, H, W), original frame (TODO: now it's only the density, need add velocity as additional channel)
-            c (torch.Tensor): (B, 3), additional condition contains (real t, src_pos_x, src_pos_y)
+            c (torch.Tensor): (B, 3), additional condition contains (real t, src_pos_x, src_pos_y), only works for condtional case
 
         Returns:
             loss (torch.Tensor): DDPM loss for reconstruct the noise

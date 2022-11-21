@@ -26,6 +26,7 @@ parse.add_argument('--local_rank', default=-1, type=int, help='node rank for dis
 parse.add_argument('--save', action='store_true', help='save model')
 parse.add_argument('--save_path', type=str, default='/media/bamf-big/gefan/DiffFluids/checkpoint/')
 parse.add_argument('--dataset', type=str, default='smoke_small', help='dataset name, default smoke_small')
+parse.add_argument('--conditional', action='store_true', help='use conditional model')
 
 args = parse.parse_args()
 
@@ -85,14 +86,17 @@ class Trainer:
             scheduler.step()
         
         if args.save:
-            torch.save(self.model.net.state_dict(), args.save_path + "ddpm_" + args.dataset + ".pkl")
+            if args.conditional:
+                torch.save(self.model.net.state_dict(), args.save_path + "ddpm_" + args.dataset + ".pkl")
+            else:
+                torch.save(self.model.net.state_dict(), args.save_path + "ddpm_" + args.dataset + "_unconditional.pkl")
             logging.info(f"Model saved to {args.save_path}")
         self.writer.close()
 
 if __name__ == '__main__':
     device = 'cuda:1'
     dataset = MyDataSet(args.data_path + args.dataset + '.npz')
-    model = DDPM(in_channels=1, n_feats=256, betas=[1e-4, 0.02], n_T=500, device=device)
+    model = DDPM(in_channels=1, n_feats=256, betas=[1e-4, 0.02], n_T=500, device=device, conditional=args.conditional)
     logging.info(f"Dataset created, {len(dataset)} sample in total.")
     if args.multi_gpu:
         sampler = torch.utils.data.distributed.DistributedSampler(dataset)    

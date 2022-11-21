@@ -143,8 +143,8 @@ class DiffusionEmbedding(nn.Module):
         # output shape: (batch_size, embed_dim, H, W)
         
 ###################################################################################################################################################
-class ConditionalUnet(nn.Module):
-    def __init__(self, in_channels: int, n_feats: int=256):
+class Unet(nn.Module):
+    def __init__(self, in_channels: int, n_feats: int=256, conditional: bool=True, pooling_scale: int=4):
         """
         Conditional Unet for predicting the density field from condition t.
         TODO: add velocity field
@@ -164,10 +164,11 @@ class ConditionalUnet(nn.Module):
         ---------------------------------------------------------------
 
         """
-        super(ConditionalUnet, self).__init__()
+        super(Unet, self).__init__()
 
         self.in_channels = in_channels
         self.n_feats = n_feats
+        self.conditional = conditional
 
         self.init_conv = ResidualConvBlock(in_channels=in_channels, out_channels=n_feats, is_res=True)
 
@@ -175,7 +176,7 @@ class ConditionalUnet(nn.Module):
         self.down2 = UnetDown(in_channels=n_feats, out_channels=2 * n_feats)
 
         # compress into latent space
-        self.to_vec = nn.Sequential(nn.AvgPool2d(4), 
+        self.to_vec = nn.Sequential(nn.AvgPool2d(pooling_scale), 
                                     nn.GELU())
 
         # embed t in diffusion step
@@ -185,13 +186,14 @@ class ConditionalUnet(nn.Module):
         self.diffusionEmbed1 = DiffusionEmbedding(input_dim=1, embed_dim=1*n_feats, projection_dim=128, learnable=True)
         # embed t in real time step,
         # embed at self.down0,
-        self.conditionEmbed0 = ConditionEmbedding(input_dim=3, embed_dim=2*n_feats)
-        # embed at self.down1,
-        self.conditionEmbed1 = ConditionEmbedding(input_dim=3, embed_dim=1*n_feats)
+        if conditional:
+            self.conditionEmbed0 = ConditionEmbedding(input_dim=3, embed_dim=2*n_feats)
+            # embed at self.down1,
+            self.conditionEmbed1 = ConditionEmbedding(input_dim=3, embed_dim=1*n_feats)
 
         self.up0 = nn.Sequential(
             # nn.ConvTranspose2d(6 * n_feat, 2 * n_feat, 5, 5), # when concat temb and cemb end up w 6*n_feat
-            nn.ConvTranspose2d(in_channels=2 * n_feats, out_channels=2 * n_feats, kernel_size=4, stride=4), # otherwise just have 2*n_feat
+            nn.ConvTranspose2d(in_channels=2 * n_feats, out_channels=2 * n_feats, kernel_size=pooling_scale, stride=pooling_scale), # otherwise just have 2*n_feat
             nn.GroupNorm(num_groups=8, num_channels=2 * n_feats),
             nn.ReLU(),
         )
@@ -226,18 +228,20 @@ class ConditionalUnet(nn.Module):
         down2 = self.down2(down1)
         hiddenvec = self.to_vec(down2)
 
+        t_emb0 = self.diffusionEmbed0(t)
+        t_emb1 = self.diffusionEmbed1(t)
         # upscaling path
         up1 = self.up0(hiddenvec)
         # first embedding
-        t_emb0 = self.diffusionEmbed0(t)
-        c_emb0 = self.conditionEmbed0(c)
+        if self.conditional:
+            c_emb0 = self.conditionEmbed0(c)
+            c_emb1 = self.conditionEmbed1(c)
+        else:
+            c_emb0 = torch.zeros_like(t_emb0)
+            c_emb1 = torch.zeros_like(t_emb1)
         # jump connection with down2
         up2 = self.up1(t_emb0*up1+ c_emb0, down2)  # add and multiply embeddings
         # (TODO: use different embedding method such as add extra channels)
-
-        # second embedding
-        t_emb1 = self.diffusionEmbed1(t)
-        c_emb1 = self.conditionEmbed1(c)
         # jump connection with down1
         up3 = self.up2(t_emb1*up2+ c_emb1, down1)
         # jump connection with x

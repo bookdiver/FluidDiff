@@ -95,7 +95,7 @@ class DDPM(nn.Module):
         loss = self.mse_loss(noise, self.net(x_t, _ts, c))
         return loss
     
-    def sample(self, n_samples: int, c_s: torch.tensor, size: Optional[tuple]=(1, 28, 28)) -> torch.Tensor:
+    def sample(self, n_samples: int, c_s: torch.tensor, size: Optional[tuple]=(1, 28, 28), noise_scale: float=0.5) -> torch.Tensor:
         """ Sampling from DDPM.
 
         Args:
@@ -107,7 +107,7 @@ class DDPM(nn.Module):
             x_i (torch.Tensor): the generated samples
         """
            
-        x_i = torch.randn(n_samples, *size).to(self.device)
+        x_i = torch.randn(n_samples, *size).to(self.device) * noise_scale
         c_s = c_s.to(self.device)
         for i in tqdm(range(self.n_T, 0, -1)):
             t_is = torch.tensor([i / self.n_T])[:, None].to(self.device)
