@@ -5,18 +5,16 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from net import Unet
+from diffusers import UNet2DModel
 
 logging.basicConfig(level=logging.DEBUG)
 
 class DDPM(nn.Module):
     def __init__(self, 
                  in_channels: int, 
-                 n_feats: int, 
                  betas: list, 
                  n_T: int, 
                  device: str,
-                 conditional: bool=True,
                  pretrained: Optional[str]=None) -> None:
         super(DDPM, self).__init__()
         """ DDPM model
@@ -27,8 +25,12 @@ class DDPM(nn.Module):
             betas (List[float]): bounds for betas in noise schedule
             n_T (int): diffusion steps
         """
-
-        self.net = Unet(in_channels, n_feats, conditional)
+        self.net = UNet2DModel(in_channels=in_channels,
+                                   out_channels=in_channels,
+                                   down_block_types=("DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
+                                   up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
+                                   block_out_channels=(64, 128, 256)
+            )
         if pretrained:
             self.net.load_state_dict(torch.load(pretrained))
             logging.info(f"Load pretrained model from {pretrained}")
@@ -72,18 +74,17 @@ class DDPM(nn.Module):
             'mab_over_sqrtmab': mab_over_sqrtmab_inv,  # (1-\alpha_t)/\sqrt{1-\bar{\alpha_t}},
         }
     
-    def forward(self, x: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ This function is used to compute the loss of DDPM.
 
         Args:
             x (torch.Tensor): (B, 1, H, W), original frame (TODO: now it's only the density, need add velocity as additional channel)
-            c (torch.Tensor): (B, 3), additional condition contains (real t, src_pos_x, src_pos_y), only works for condtional case
 
         Returns:
             loss (torch.Tensor): DDPM loss for reconstruct the noise
         """        
         _nts = torch.randint(1, self.n_T, (x.shape[0],)).to(self.device)
-        _ts = (_nts / self.n_T)[:, None]  # t ~ Uniform(0, n_T), extended to (B, 1)
+        _ts = (_nts / self.n_T)
         noise = torch.randn_like(x)  # eps ~ N(0, 1), 
         sqrtab = self.sqrtab[_nts, None, None, None]    # \sqrt{\bar{\alpha_t}}, extended to (B, 1, 1, 1)
         sqrtmab = self.sqrtmab[_nts, None, None, None]  # \sqrt{1-\bar{\alpha_t}}, extended to (B, 1, 1, 1)
@@ -93,33 +94,21 @@ class DDPM(nn.Module):
         # the noisy term in loss
         
         # return MSE between added noise, and our predicted noise
-        loss = self.mse_loss(noise, self.net(x_t, _ts, c))
+        loss = self.mse_loss(noise, self.net(x_t, _ts)[0])
         return loss
     
-    def sample(self, c_s: torch.tensor, domain_size: Optional[list]=None) -> torch.Tensor:
-        """ Sampling from DDPM.
-        TODO: use different sampling method, such as SDE solver or PC sampler
-
-        Args:
-            c_s (torch.tensor): conditions, with size of (B, 3) to match the channel dimension
-            domain_list (Optional[list]): domain size of system, (H, W)
-
-        Returns:
-            x_i (torch.Tensor): the generated samples
-        """
-        if domain_size:
-            H, W = domain_size
+    def sample(self, n_samples: int, size: Optional[tuple]=None) -> torch.Tensor:
+        if size is not None:
+            x_i = torch.randn(n_samples, 1, *size).to(self.device)
         else:
-            H, W = 128, 96
-        x_i = torch.randn(c_s.shape[0], 1, H, W).to(self.device)
-        c_s = c_s.to(self.device)
+            x_i = torch.randn(n_samples, 1, 96, 64).to(self.device)
         for i in tqdm(range(self.n_T, 0, -1)):
-            t_is = torch.tensor([i / self.n_T])[:, None].to(self.device)
+            t_is = torch.tensor([i / self.n_T]).to(self.device)
 
             z = torch.randn_like(x_i) if i > 1 else 0
 
             with torch.no_grad():
-                noise = self.net(x_i, t_is, c_s)
+                noise = self.net(x_i, t_is)[0]
                 x_i = self.oneover_sqrta[i] * (x_i - noise * self.mab_over_sqrtmab[i]) + self.sqrt_beta_t[i] * z
             
         return x_i
