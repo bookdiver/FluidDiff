@@ -1,21 +1,14 @@
-import logging
-from typing import Optional
-
 import torch
 import torch.nn as nn
-from tqdm import tqdm
 
 from diffusers import UNet2DModel
-
-logging.basicConfig(level=logging.DEBUG)
 
 class DDPM(nn.Module):
     def __init__(self, 
                  in_channels: int, 
                  betas: list, 
-                 n_T: int, 
-                 device: str,
-                 pretrained: Optional[str]=None) -> None:
+                 n_T: int
+                 ) -> None:
         super(DDPM, self).__init__()
         """ DDPM model
 
@@ -27,21 +20,16 @@ class DDPM(nn.Module):
         """
         self.net = UNet2DModel(in_channels=in_channels,
                                    out_channels=in_channels,
-                                   down_block_types=("DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
-                                   up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
-                                   block_out_channels=(64, 128, 256)
+                                   down_block_types=("DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
+                                   up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
+                                   block_out_channels=(64, 128, 256, 512)
             )
-        if pretrained:
-            self.net.load_state_dict(torch.load(pretrained))
-            logging.info(f"Load pretrained model from {pretrained}")
-        
         self.betas = betas
         self.n_T = n_T
         self.mse_loss = nn.MSELoss()
 
         for k, v in self.ddpm_schedule().items():
             self.register_buffer(k, v)
-        self.device = device
     
     def ddpm_schedule(self) -> dict:
         """ Pre-computed schedules for DDPM training.
@@ -83,7 +71,7 @@ class DDPM(nn.Module):
         Returns:
             loss (torch.Tensor): DDPM loss for reconstruct the noise
         """        
-        _nts = torch.randint(1, self.n_T, (x.shape[0],)).to(self.device)
+        _nts = torch.randint(1, self.n_T, (x.shape[0],)).to(self.net.device)
         _ts = (_nts / self.n_T)
         noise = torch.randn_like(x)  # eps ~ N(0, 1), 
         sqrtab = self.sqrtab[_nts, None, None, None]    # \sqrt{\bar{\alpha_t}}, extended to (B, 1, 1, 1)
@@ -97,18 +85,17 @@ class DDPM(nn.Module):
         loss = self.mse_loss(noise, self.net(x_t, _ts)[0])
         return loss
     
-    def sample(self, n_samples: int, size: Optional[tuple]=None) -> torch.Tensor:
-        if size is not None:
-            x_i = torch.randn(n_samples, 1, *size).to(self.device)
-        else:
-            x_i = torch.randn(n_samples, 1, 96, 64).to(self.device)
-        for i in tqdm(range(self.n_T, 0, -1)):
-            t_is = torch.tensor([i / self.n_T]).to(self.device)
+    def sample(self, x: torch.Tensor) -> torch.Tensor:
+        """ Sample from DDPM model.
+        """
 
-            z = torch.randn_like(x_i) if i > 1 else 0
+        for i in range(self.n_T, 0, -1):
+            t_is = torch.tensor([i / self.n_T]).to(self.net.device)
+
+            z = torch.randn_like(x) if i > 1 else 0
 
             with torch.no_grad():
-                noise = self.net(x_i, t_is)[0]
-                x_i = self.oneover_sqrta[i] * (x_i - noise * self.mab_over_sqrtmab[i]) + self.sqrt_beta_t[i] * z
+                noise = self.net(x, t_is)[0]
+                x = self.oneover_sqrta[i] * (x - noise * self.mab_over_sqrtmab[i]) + self.sqrt_beta_t[i] * z
             
-        return x_i
+        return x

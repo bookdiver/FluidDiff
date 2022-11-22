@@ -37,31 +37,3 @@ class MyDataSet(Dataset):
     def __len__(self) -> int:
         return self.length
     
-    # def _get_params(self) -> None:
-    #     for key, value in self.params.items():
-    #         print(f'{key}: {value}')
-    
-    # def _show_idv_sample(self, index: int) -> None:
-    #     assert index < self.length
-    #     _rho = self.density[index].numpy().squeeze()
-    #     _vel = self.velocity[index].numpy()
-    #     _time = self.conditions[index].numpy()[0]
-    #     _pos = self.conditions[index].numpy()[1:]
-    #     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-    #     p1 = axes[0].imshow(_rho, cmap='gray', origin='lower')
-    #     axes[0].axis('off')
-    #     fig.colorbar(p1, ax=axes[0])
-    #     axes[1].quiver(_vel[1, ::5, ::5], _vel[0, ::5, ::5])
-    #     axes[1].axis('off')
-    #     fig.suptitle(f"Sample {index}, time {_time:.2f} s, position ({_pos[0]:.2f}, {_pos[1]:.2f})")
-    #     plt.show()
-    
-    # def _show_frame(self, frame: int) -> None:
-    #     assert frame < self.params['num_frames']
-    #     _rhos = self.density[(frame-1)*self.params['batch_size']:frame*self.params['batch_size']]
-    #     _time = self.params['time_step'] * frame
-    #     grid = make_grid(_rhos, nrow=14, padding=2, normalize=True, pad_value=1)
-    #     plt.figure(figsize=(28, 18))
-    #     plt.imshow(grid.detach().numpy()[0, ...], cmap='gray', origin='lower')
-    #     plt.axis('off')
-    #     plt.title(fr"Frame {frame}, time {_time:.2f} s")   
