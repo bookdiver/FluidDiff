@@ -7,7 +7,7 @@ from tqdm import tqdm
 import phi.torch.flow as flow
 import phi.math as pmath
 
-logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.INFO)
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', type=str, help="The scale of dataset, can be chosen from 'small', 'medium', 'large'", default='small')

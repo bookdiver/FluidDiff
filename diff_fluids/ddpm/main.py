@@ -16,8 +16,8 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
-from utils import MyDataSet
-from ddpm import DDPM
+from DiffFluids.diff_fluids.ddpm.utils import MyDataSet
+from DiffFluids.diff_fluids.ddpm.ddpm import DDPM
 
 dataset_name = ['smoke_small', 'smoke_medium', 'smoke_large']
 device_ids = [0, 1, -1]
@@ -106,11 +106,11 @@ def main_worker(local_rank: int, nprocs: int, args: dict):
     if local_rank == 0 and args.not_save == False:
         tb_writer = SummaryWriter(log_dir='/media/bamf-big/gefan/DiffFluids/logs/' + args.dataset +'/')
         if args.dataset == 'smoke_small':
-            init_x = torch.randn((8, 1, 64, 48)).cuda(local_rank)
+            init_x = torch.randn((8, 1, 64, 64)).cuda(args.device)
         elif args.dataset == 'smoke_medium':
-            init_x = torch.randn((8, 1, 96, 64)).cuda(local_rank)
+            init_x = torch.randn((8, 1, 64, 64)).cuda(args.device)
         elif args.dataset == 'smoke_large':
-            init_x = torch.randn((8, 1, 128, 96)).cuda(local_rank)
+            init_x = torch.randn((8, 1, 96, 96)).cuda(args.device)
 
     for epoch in range(args.epochs):
         model.module.net.train()
@@ -118,12 +118,9 @@ def main_worker(local_rank: int, nprocs: int, args: dict):
         scheduler.step(epoch)
         if local_rank == 0:
             pbar = tqdm(dataloader, total=len(dataloader))
-        ep_cum_loss = 0
         for i, batch in enumerate(pbar if local_rank == 0 else dataloader):
             density = batch[0].cuda(non_blocking=True)
             loss = model.module(density)
-            ep_cum_loss += loss.item()
-            ep_avg_loss = ep_cum_loss / (i+1)
             dist.barrier()
             reduced_loss = reduce_mean(loss, args.nprocs)
             optimizer.zero_grad()
