@@ -2,7 +2,7 @@
 
 # small simulation, total samples: 1600
 small:
-  resolution_x: 48
+  resolution_x: 64
   resolution_y: 64
   num_frames: 100
   time_step: 0.5
@@ -18,7 +18,7 @@ small:
 # medium simulation, total samples: 7200
 medium:
   resolution_x: 64
-  resolution_y: 96
+  resolution_y: 64
   num_frames: 200
   time_step: 0.25
 
@@ -33,7 +33,7 @@ medium:
 # large simulation, total samples: 25600
 large:
   resolution_x: 96
-  resolution_y: 128
+  resolution_y: 96
   num_frames: 400
   time_step: 0.125
 
