@@ -27,7 +27,7 @@ parse.add_argument('--device', type=int, default=1, choices=device_ids, help='de
 parse.add_argument('--epochs', type=int, default=20, help='number of epochs, default: 20')
 parse.add_argument('--batch-size', type=int, default=16, help='batch size, default: 16')
 
-parse.add_argument('--latent-dim', type=int, default=128, help='latent dimension, default: 128')
+parse.add_argument('--latent-channels', type=int, default=32, help='latent space channel, default: 32')
 
 class FluidDataset(Dataset):
     def __init__(self, data: str='smoke_small'):
@@ -65,12 +65,12 @@ def vis(x: torch.Tensor, x_hat: torch.Tensor) -> plt.figure:
     x_hat_grid = make_grid(x_hat, nrow=2, normalize=True)
     x_res_grid = make_grid(torch.abs(x - x_hat), nrow=2)
     fig, ax = plt.subplots(1, 3)
-    p1 = ax[0].imshow(x_grid.permute(1, 2, 0), cmap='gray', origin='lower')
-    p2 = ax[1].imshow(x_hat_grid.permute(1, 2, 0), cmap='gray', origin='lower')
-    p3 = ax[2].imshow(x_res_grid.permute(1, 2, 0), cmap='gray', origin='lower')
-    fig.colorbar(p1, ax=ax[0])
-    fig.colorbar(p2, ax=ax[1])
-    fig.colorbar(p3, ax=ax[2])
+    p1 = ax[0].imshow(x_grid.permute(1, 2, 0).numpy(), cmap='gray', origin='lower')
+    p2 = ax[1].imshow(x_hat_grid.permute(1, 2, 0).numpy(), cmap='gray', origin='lower')
+    p3 = ax[2].imshow(x_res_grid.permute(1, 2, 0).numpy(), cmap='gray', origin='lower')
+    fig.colorbar(p1, ax=ax[0], fraction=0.046, pad=0.04)
+    fig.colorbar(p2, ax=ax[1], fraction=0.046, pad=0.04)
+    fig.colorbar(p3, ax=ax[2], fraction=0.046, pad=0.04)
     ax[0].set_title('Original')
     ax[1].set_title('Reconstruction')
     ax[2].set_title('Residual')
@@ -83,7 +83,7 @@ def main(args):
     if not args.debug:
         tb_writer = SummaryWriter(log_dir=f'./logs/{args.dataset}')
 
-    model = Autoencoder(in_channels=1).cuda(args.device)
+    model = Autoencoder(in_channels=1, z_channels=args.latent_channels).cuda(args.device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     for epoch in range(1, args.epochs+1):
@@ -93,7 +93,9 @@ def main(args):
             input = input.cuda(args.device)
             optimizer.zero_grad()
             output = model(input)
-            loss = elbo_loss(output['x'], output['x_hat'], output['z'].mean, output['z'].log_var)
+            mean = output['z'].mean.flatten(start_dim=1, end_dim=-1)
+            log_var = output['z'].log_var.flatten(start_dim=1, end_dim=-1)
+            loss = elbo_loss(output['x'], output['x_hat'], mean, log_var, recon_loss_type='mse')
             loss.backward()
             optimizer.step()
             cum_loss += loss.item()
@@ -105,8 +107,8 @@ def main(args):
             with torch.no_grad():
                 samples = next(iter(dataloader))[:4].cuda(args.device)
                 samples_hat = model(samples)['x_hat']
-                fig = vis(samples, samples_hat)
-                tb_writer.add_image('Visualition', fig, epoch)
+                fig = vis(samples.detach().cpu(), samples_hat.detach().cpu())
+                tb_writer.add_figure('Visualition', fig, epoch)
     
     if not args.debug:
         tb_writer.close()
