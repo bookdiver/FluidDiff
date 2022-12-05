@@ -3,13 +3,15 @@ import logging
 
 import torch
 import numpy as np
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torchvision.transforms as transforms 
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
-from vae import VAE
+from vae import Autoencoder
 
 logging.basicConfig(level=logging.INFO)
 
@@ -45,6 +47,35 @@ class FluidDataset(Dataset):
         frame = self.transform(frame)
         return frame
 
+def elbo_loss(x: torch.Tensor, x_hat: torch.Tensor, mu: torch.Tensor, logvar: torch.Tensor, beta: float=0.5, recon_loss_type: str='bce') -> torch.Tensor:
+    """
+    Calculate the ELBO loss
+    """
+    if recon_loss_type == 'mse':
+        recon_loss = F.mse_loss(x_hat, x, reduction='sum')
+    elif recon_loss_type == 'bce':
+        recon_loss = F.binary_cross_entropy(x_hat, x, reduction='sum')
+    else:
+        raise ValueError('Invalid reconstruction loss type')
+    kld_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp(), dim=1), dim=0)
+    return recon_loss + beta * kld_loss
+
+def vis(x: torch.Tensor, x_hat: torch.Tensor) -> plt.figure:
+    x_grid = make_grid(x, nrow=2, normalize=True)
+    x_hat_grid = make_grid(x_hat, nrow=2, normalize=True)
+    x_res_grid = make_grid(torch.abs(x - x_hat), nrow=2)
+    fig, ax = plt.subplots(1, 3)
+    p1 = ax[0].imshow(x_grid.permute(1, 2, 0), cmap='gray', origin='lower')
+    p2 = ax[1].imshow(x_hat_grid.permute(1, 2, 0), cmap='gray', origin='lower')
+    p3 = ax[2].imshow(x_res_grid.permute(1, 2, 0), cmap='gray', origin='lower')
+    fig.colorbar(p1, ax=ax[0])
+    fig.colorbar(p2, ax=ax[1])
+    fig.colorbar(p3, ax=ax[2])
+    ax[0].set_title('Original')
+    ax[1].set_title('Reconstruction')
+    ax[2].set_title('Residual')
+    return fig
+
 def main(args):
     dataset = FluidDataset(args.dataset)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True)
@@ -52,8 +83,8 @@ def main(args):
     if not args.debug:
         tb_writer = SummaryWriter(log_dir=f'./logs/{args.dataset}')
 
-    in_dim = dataset[0].shape[-2]
-    model = VAE(in_channels=1, in_dim=in_dim, latent_dim=args.latent_dim).cuda(args.device)
+    model = Autoencoder(in_channels=1).cuda(args.device)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
     for epoch in range(1, args.epochs+1):
         pbar = tqdm(dataloader)
@@ -62,23 +93,20 @@ def main(args):
             input = input.cuda(args.device)
             optimizer.zero_grad()
             output = model(input)
-            losses = model.loss_function(output)
-            loss = losses['loss']
+            loss = elbo_loss(output['x'], output['x_hat'], output['z'].mean, output['z'].log_var)
             loss.backward()
             optimizer.step()
             cum_loss += loss.item()
             pbar.set_description(f'Epoch {epoch}, Average Loss: {(cum_loss/(i+1)):.4f}')
             if not args.debug:
-                tb_writer.add_scalar('Loss', losses['loss'].item(), epoch*len(dataloader)+i)
-                tb_writer.add_scalar('Reconstruction Loss', losses['reconstruction_loss'].item(), epoch*len(dataloader)+i)
-                tb_writer.add_scalar('KL Loss', losses['kld_loss'].item(), epoch*len(dataloader)+i)
+                tb_writer.add_scalar('Loss', loss.item(), epoch*len(dataloader)+i)
         if epoch % 5 == 0 and not args.debug:
             logging.info(f'Evaluating on epoch {epoch}')
             with torch.no_grad():
-                samples = next(iter(dataloader))
-                output = model(samples.cuda(args.device))
-                tb_writer.add_image('Original', torch.flip(make_grid(samples, nrow=4, normalize=True), dims=[1]), epoch)
-                tb_writer.add_image('Reconstruction', torch.flip(make_grid(output['recon'], nrow=4, normalize=True), dims=[1]), epoch)
+                samples = next(iter(dataloader))[:4].cuda(args.device)
+                samples_hat = model(samples)['x_hat']
+                fig = vis(samples, samples_hat)
+                tb_writer.add_image('Visualition', fig, epoch)
     
     if not args.debug:
         tb_writer.close()
