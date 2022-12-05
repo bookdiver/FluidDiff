@@ -416,3 +416,16 @@ class Autoencoder(nn.Module):
         x_hat = self.decode(z.sample())
         # Return the results
         return {'x': x, 'x_hat': x_hat, 'z': z}  
+
+def _test_vae():
+    vae = Autoencoder(in_channels=1, out_channels=1, n_res_blocks=2, emb_channels=32, z_channels=32)
+    x = torch.randn(2, 1, 32, 32)
+    out = vae(x)
+    print("original input shape:", out['x'].shape)
+    print("reconstruction output shape:", out['x_hat'].shape)
+    print("latent space shape:", out['z'].sample().shape)
+    print("latent space mean shape:", out['z'].mean.shape)
+    print("latent space log variance shape:", out['z'].log_var.shape)
+
+if __name__ == '__main__':
+    _test_vae()
