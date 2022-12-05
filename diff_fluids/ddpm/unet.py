@@ -1,250 +1,179 @@
+import math
+from typing import List, Optional
+
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-class ResidualConvBlock(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, is_res: bool=False) -> None:
-        super(ResidualConvBlock, self).__init__()
-        """
-        Standard ResNet style convolutional block, when is_res is True, the block is a residual block,
-        otherwise it is a standard 2-layer convolutional block. In this block, the size of input won't change.
-        """
-        self.same_channels = in_channels==out_channels
-        self.is_res = is_res
-        self.conv1 = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.GELU(),
-        )
-        self.conv2 = nn.Sequential(
-            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
-            nn.BatchNorm2d(out_channels),
-            nn.GELU(),
-        )
-    
+from unet_transformer import SpatialTransformer
+
+class GroupNorm32(nn.GroupNorm):
+    """ Group normalization with float32 casting
+    """
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.is_res:
-            x1 = self.conv1(x)
-            x2 = self.conv2(x1)
-            # this adds on correct residual in case channels have increased,
-            if self.same_channels:
-                out = x + x2
-            else:
-                out = x1 + x2 
-            # do the normalization on the sum of the two convolutions,
-            return out / 1.414
-        else:
-            x1 = self.conv1(x)
-            x2 = self.conv2(x1)
-            return x2
+        return super().forward(x.float()).type(x.dtype)
 
+def normalization(channels: int) -> nn.GroupNorm:
+    """ get the normalization layer
+    """
+    return GroupNorm32(32, channels)
 
-class UnetDown(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int) -> None:
-        super(UnetDown, self).__init__()
-        """
-        Downscaling block in Unet, which consist of 1 ResidualConvBlock and 1 MaxPool2d layer.
-        After this block, the size of the feature maps will be halved.
-        """
-        layers = [# a normal 2-layer convolutional block
-                    ResidualConvBlock(in_channels=in_channels, out_channels=out_channels, is_res=False), 
-                    nn.MaxPool2d(kernel_size=2)]
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # input shape: (batch_size, in_channels, height, width)
-        return self.model(x)
-        # output shape: (batch_size, out_channels, height/2, width/2)
-
-
-class UnetUp(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int) -> None:
-        super(UnetUp, self).__init__()
-        """
-        Upscaling block in Unet, which consist of 1 ConvTranspose2d layer and 2 ResidualConvBlock.
-        After this block, the size of the feature maps will be doubled.
-        Also it receives the output of the corresponding downscaling block as skip connection.
-        """
-        layers = [
-            nn.ConvTranspose2d(in_channels, out_channels, kernel_size=2, stride=2),
-            ResidualConvBlock(out_channels, out_channels),
-            ResidualConvBlock(out_channels, out_channels),
-        ]
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor, skip_x: torch.Tensor) -> torch.Tensor:
-        # input shape: x:(batch_size, in_channels/2, height, width) | skip:(batch_size, in_channels/2, height, width)
-        # skip_x is the output from the downscaling path
-        x = torch.cat((x, skip_x), dim=1)
-        x = self.model(x)
-        return x
-        # output shape: (batch_size, out_channels, 2*height, 2*width)
-
-
-class ConditionEmbedding(nn.Module):
-    def __init__(self, input_dim: int, embed_dim: int) -> None:
-        super(ConditionEmbedding, self).__init__()
-        """
-        Generic 1-layer fc for embedding condition information (tau, src_pos_x, src_pos_y), which takes 1 vector as input and outputs a vector with emb_dim. 
-        (TODO: add more layers)
-        """
-        layers = [
-            nn.Linear(in_features=input_dim, out_features=embed_dim),
-            nn.GELU(),
-            nn.Linear(in_features=embed_dim, out_features=embed_dim),
-        ]
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # input shape: (batch_size, input_dim)
-        return self.model(x)[..., None, None]
-        # output shape: (batch_size, embed_dim, H, W)
-
-
-class GaussianFourierFeatures(nn.Module):
-    def __init__(self, input_dim: int, projection_dim: int, learnable: bool=True) -> None:
-        super(GaussianFourierFeatures, self).__init__()
-        '''
-        Gaussian Fourier Features, which takes 1 scalar as input and outputs a vector with projection_dim.
-        '''
-        self.projection_dim = projection_dim
-        self.learnable = learnable
-        self.weights = nn.Parameter(torch.randn(input_dim, projection_dim) / np.sqrt(input_dim))
-        self.bias = nn.Parameter(torch.randn(projection_dim) / np.sqrt(input_dim))
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # input shape: (batch_size, input_dim)
-        if self.learnable:
-            # learnable weights
-            x = torch.cos(x @ self.weights + self.bias)
-        else:
-            # fixed weights
-            x = torch.cos(x @ self.weights.detach() + self.bias.detach())
-        return x
-        # output shape: (batch_size, projection_dim)
-
-
-class DiffusionEmbedding(nn.Module):
-    def __init__(self, input_dim: int, embed_dim: int, projection_dim: int, learnable: bool=True) -> None:
-        super(DiffusionEmbedding, self).__init__()
-        """
-        Diffusion embedding, which takes 1 scalar as input and outputs a vector with embed_dim.
-        """
-        self.gff = GaussianFourierFeatures(input_dim, projection_dim, learnable)
-        self.fc = nn.Linear(projection_dim, embed_dim)
-        self.gelu = nn.GELU()
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # input shape: (batch_size, input_dim)
-        x = self.gff(x)
-        x = self.fc(x)
-        x = self.gelu(x)
-        return x[..., None, None]
-        # output shape: (batch_size, embed_dim, H, W)
-        
-###################################################################################################################################################
-class Unet(nn.Module):
-    def __init__(self, in_channels: int, n_feats: int=256, conditional: bool=True, pooling_scale: int=4):
-        """
-        Conditional Unet for predicting the density field from condition t.
-        TODO: add velocity field
-        TODO: add group normalization
-        ---------------------------------------------------------------
-        |       init_conv ------------------> out                     |
-        |            |                       ^                        |
-        |            v                       |                        |
-        |            down1 -------------> up2                         |
-        |                |                  ^ <---- conditionEmbed1   |
-        |                v                  | <---- diffusionEmbed1   |
-        |                down2 ---------> up1                         |
-        |                |               ^  <---- conditionEmbed0     |
-        |                v               |  <---- diffusionEmbed0     |
-        |                to_vec ------> up0                           |
-        |                                                             |
-        ---------------------------------------------------------------
-
-        """
-        super(Unet, self).__init__()
-
-        self.in_channels = in_channels
-        self.n_feats = n_feats
-        self.conditional = conditional
-
-        self.init_conv = ResidualConvBlock(in_channels=in_channels, out_channels=n_feats, is_res=True)
-
-        self.down1 = UnetDown(in_channels=n_feats, out_channels=n_feats)
-        self.down2 = UnetDown(in_channels=n_feats, out_channels=2 * n_feats)
-
-        # compress into latent space
-        self.to_vec = nn.Sequential(nn.AvgPool2d(pooling_scale), 
-                                    nn.GELU())
-
-        # embed t in diffusion step
-        # embed at self.down0
-        self.diffusionEmbed0 = DiffusionEmbedding(input_dim=1, embed_dim=2*n_feats, projection_dim=128, learnable=True)
-        # embed at self.down1
-        self.diffusionEmbed1 = DiffusionEmbedding(input_dim=1, embed_dim=1*n_feats, projection_dim=128, learnable=True)
-        # embed t in real time step,
-        # embed at self.down0,
-        if conditional:
-            self.conditionEmbed0 = ConditionEmbedding(input_dim=3, embed_dim=2*n_feats)
-            # embed at self.down1,
-            self.conditionEmbed1 = ConditionEmbedding(input_dim=3, embed_dim=1*n_feats)
-
-        self.up0 = nn.Sequential(
-            # nn.ConvTranspose2d(6 * n_feat, 2 * n_feat, 5, 5), # when concat temb and cemb end up w 6*n_feat
-            nn.ConvTranspose2d(in_channels=2 * n_feats, out_channels=2 * n_feats, kernel_size=pooling_scale, stride=pooling_scale), # otherwise just have 2*n_feat
-            nn.GroupNorm(num_groups=8, num_channels=2 * n_feats),
-            nn.ReLU(),
-        )
-
-        self.up1 = UnetUp(in_channels=4 * n_feats, out_channels=n_feats)
-        self.up2 = UnetUp(in_channels=2 * n_feats, out_channels=n_feats)
-
-        self.out = nn.Sequential(
-            nn.Conv2d(in_channels=2 * n_feats, out_channels=n_feats, kernel_size=3, stride=1, padding=1),
-            nn.GroupNorm(num_groups=8, num_channels=n_feats),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=n_feats, out_channels=self.in_channels, kernel_size=3, stride=1, padding=1),
-        )
-
-    def forward(self, x: torch.Tensor, t: torch.Tensor, c: torch.Tensor) -> torch.Tensor:
-        """ Condtional Unet for approximating the noise for a given diffusion time t and real time tau.
+class ResBlock(nn.Module):
+    def __init__(self, 
+                 in_channels: int, 
+                 d_t_emb: int,
+                 *,
+                 out_channels:Optional[int]=None):
+        """ Residual block for the UNet
 
         Args:
-            x (torch.Tensor): noisy samples (B, 1, H, W)
-            t (torch.Tensor): diffusion time (B, 1)
-            c (torch.Tensor): additional condition (B, 3)
+            in_channels (int): the input channel size
+            d_t_emb (int): the size of the temporal embedding
+            out_channels (Optional[int], optional): the output channel size. Defaults to be same as in_channels.
+        """
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+
+        self.in_layers = nn.Sequential(
+            normalization(in_channels),
+            nn.SiLU(),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+        )
+
+        self.embedding_layers = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(d_t_emb, out_channels)
+        )
+
+        self.out_layers = nn.Sequential(
+            normalization(out_channels),
+            nn.SiLU(),
+            nn.Dropout(0.1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
+        )
+        
+        # inner residual connection
+        if in_channels == out_channels:
+            self.res_connnection = nn.Identity()
+        else:
+            self.res_connnection = nn.Conv2d(in_channels, out_channels, kernel_size=1)
+    
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor) -> torch.Tensor:
+        """ foward pass
+
+        Args:
+            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
+            t_emb (torch.Tensor): diffusion time embedding with shape (batch_size, d_t_emb)
 
         Returns:
-            epsilon (torch.Tensor): the noise added on the input (B, 1, H, W) compared with the clean one
-        """        
+            torch.Tensor: output feature map with shape (batch_size, channels, height, width)
+        """ 
+        h = self.in_layers(x)
+        t_emb = self.embedding_layers(t_emb).type(h.dtype)
+        h = h + t_emb[:, :, None, None]
+        h = self.out_layers(h)
+        return h + self.res_connnection(x)
+        
+class DownSample(nn.Module):
+    def __init__(self, 
+                 in_channels: int, 
+                 out_channels: Optional[int]=None
+                 ):
+        """ Downsample the feature map
+        """
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1)
 
-        # embed diffusion time and read time
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """ forward pass
 
-        # downscaling path
-        x = self.init_conv(x)
-        down1 = self.down1(x)
-        down2 = self.down2(down1)
-        hiddenvec = self.to_vec(down2)
+        Args:
+            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
 
-        t_emb0 = self.diffusionEmbed0(t)
-        t_emb1 = self.diffusionEmbed1(t)
-        # upscaling path
-        up1 = self.up0(hiddenvec)
-        # first embedding
-        if self.conditional:
-            c_emb0 = self.conditionEmbed0(c)
-            c_emb1 = self.conditionEmbed1(c)
-        else:
-            c_emb0 = torch.zeros_like(t_emb0)
-            c_emb1 = torch.zeros_like(t_emb1)
-        # jump connection with down2
-        up2 = self.up1(t_emb0*up1+ c_emb0, down2)  # add and multiply embeddings
-        # (TODO: use different embedding method such as add extra channels)
-        # jump connection with down1
-        up3 = self.up2(t_emb1*up2+ c_emb1, down1)
-        # jump connection with x
-        out = self.out(torch.cat((up3, x), 1))
-        return out
+        Returns:
+            torch.Tensor: output feature map with shape (batch_size, channels, height/2, width/2)
+        """
+        return self.conv(x)
 
+class UpSample(nn.Module):
+    def __init__(self, 
+                 in_channels: int, 
+                 out_channels: Optional[int]=None
+                 ):
+        """ Upsample the feature map
+        """
+        super().__init__()
+        if out_channels is None:
+            out_channels = in_channels
+        self.conv = nn.ConvTranspose2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1, output_padding=1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """ forward pass
+
+        Args:
+            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
+
+        Returns:
+            torch.Tensor: output feature map with shape (batch_size, channels, height*2, width*2)
+        """
+        return self.conv(x)
+
+class TimeStepEmbedSequential(nn.Sequential):
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
+        """ forward pass
+
+        Args:
+            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
+            t_emb (torch.Tensor): diffusion time embedding with shape (batch_size, d_t_emb)
+            cond (Optional[torch.Tensor], optional): conditional feature map with shape (batch_size, channels, d_cond). Defaults to None.
+
+        Returns:
+            torch.Tensor: output feature map with shape (batch_size, channels, height, width)
+        """
+        for module in self:
+            if isinstance(module, ResBlock):
+                x = module(x, t_emb)
+            elif isinstance(module, SpatialTransformer):
+                x = module(x, cond)
+            else:
+                x = module(x)
+        return x
+
+class UNetModel(nn.Module):
+    def __init__(self, 
+                 *,
+                 in_channels: int,
+                 out_channels: int,
+                 init_channels: int,
+                 channel_multpliers: List[int],
+                 n_res_blocks: int, 
+                 attention_levels: List[int],
+                 n_heads: int,
+                 transformer_layers: int=1,
+                 d_cond: int=3):
+        """ UNet model for approximating noise
+
+        Args:
+            in_channels (int): the input channel size
+            out_channels (int): the output channel size
+            init_channels (int): the initial channel size for the first convolution layer
+            channel_multpliers (List[int]): the channel multiplier for each level
+            n_res_blocks (int): the number of residual blocks in each level
+            attention_levels (List[int]): the levels where to apply attention at
+            n_heads (int): the number of heads for the attention
+            transformer_layers (int, optional): the number of transformer layers. Defaults to 1.
+            d_cond (int, optional): the size of the conditional embedding. Defaults to 3.
+        """ 
+        super().__init__()
+        self.init_channels = init_channels
+
+        n_levels = len(channel_multpliers)
+
+        d_time_emb = init_channels * 4
+        self.time_embedding = nn.Sequential(
+            nn.Linear(init_channels, )
+        )
