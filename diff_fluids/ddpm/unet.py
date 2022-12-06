@@ -250,8 +250,11 @@ class UNetModel(nn.Module):
         ).to(device=time_steps.device)
 
         args = time_steps[:, None].float() * freqs[None]
-
-        return torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+        # pe = torch.zeros(time_steps.shape[0], self.channels, device=time_steps.device)
+        # pe[:, 0::2] = torch.sin(args)
+        # pe[:, 1::2] = torch.cos(args)
+        pe = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        return pe
     
     def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
         """ forward pass
@@ -287,10 +290,9 @@ class UNetModel(nn.Module):
 
 def _test_time_step_embedding():
     import matplotlib.pyplot as plt
-    import numpy as np
     unet = UNetModel(in_channels=1,
                     out_channels=1,
-                    channels=32, 
+                    channels=64, 
                     channel_multpliers=[],
                     n_res_blocks=1,
                     attention_levels=[],
@@ -299,9 +301,12 @@ def _test_time_step_embedding():
                     d_cond=1)
     time_steps = torch.arange(0, 1000)
     t_emb = unet.time_step_embedding(time_steps)
-    plt.plot(np.arange(0, 1000), t_emb[:, [4, 8, 16]].detach().numpy())
-    plt.legend(f"dim{i}" for i in [4, 8, 16])
-    plt.title('Time step embedding')
+    plt.figure()
+    plt.imshow(t_emb.detach().numpy(), cmap='jet', aspect='auto', origin='lower')
+    plt.xlabel('Dimension')
+    plt.ylabel('Diffusion Time')
+    plt.title('Fouriour Features for Diffusion Time')
+    plt.colorbar()
     plt.show()
 
 def _test_unet():
