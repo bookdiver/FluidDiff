@@ -138,7 +138,7 @@ class SpatialTransformer(nn.Module):
 
         Args:
             d_model (int): the number of channels of the input
-            d_cond (int): the size of conditioning vector
+            d_cond (int): the number of channels of conditioning vector
             n_heads (int): the number of heads
             n_layers (int): the number of transformer layers
         """ 
@@ -191,13 +191,14 @@ def _test_basic_transformer_block():
 
 def _test_spatial_transformer():
     st = SpatialTransformer(d_model=64, d_cond=32, n_heads=4, n_layers=1)
+    print(f"total params: {sum(p.numel() for p in st.parameters())}")
     x = torch.randn(2, 64, 16, 16)
     cond = torch.randn(2, 32, 3)
     out = st(x, cond)
     print(out.shape)
 
 if __name__ == '__main__':
-    _test_cross_attention()
-    _test_basic_transformer_block()
+    # _test_cross_attention()
+    # _test_basic_transformer_block()
     _test_spatial_transformer()
 
