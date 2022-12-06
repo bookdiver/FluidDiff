@@ -286,18 +286,23 @@ class UNetModel(nn.Module):
         return self.out(x)
 
 def _test_time_step_embedding():
-    unet = UNetModel(in_channels=32,
-                    out_channels=32,
-                    channels=64,
-                    channel_multpliers=[1, 2, 4, 8],
-                    n_res_blocks=2,
-                    attention_levels=[1, 2, 3],
-                    n_heads=4,
+    import matplotlib.pyplot as plt
+    import numpy as np
+    unet = UNetModel(in_channels=1,
+                    out_channels=1,
+                    channels=32, 
+                    channel_multpliers=[],
+                    n_res_blocks=1,
+                    attention_levels=[],
+                    n_heads=1,
                     transformer_layers=1,
-                    d_cond=32)
-    time_steps = torch.randint(0, 100, (16,))
+                    d_cond=1)
+    time_steps = torch.arange(0, 1000)
     t_emb = unet.time_step_embedding(time_steps)
-    print(t_emb.shape)
+    plt.plot(np.arange(0, 1000), t_emb[:, [4, 8, 16]].detach().numpy())
+    plt.legend(f"dim{i}" for i in [4, 8, 16])
+    plt.title('Time step embedding')
+    plt.show()
 
 def _test_unet():
     unet = UNetModel(in_channels=4,
@@ -318,5 +323,5 @@ def _test_unet():
     print(output.shape)
 
 if __name__ == "__main__":
-    # _test_time_step_embedding()
-    _test_unet()
+    _test_time_step_embedding()
+    # _test_unet()

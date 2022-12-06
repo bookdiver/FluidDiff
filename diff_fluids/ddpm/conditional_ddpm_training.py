@@ -63,7 +63,7 @@ class Configs:
             attention_levels = self.attention_levels,
             n_heads = self.n_heads,
             transformer_layers = self.transformer_layers,
-            d_cond = args.batch_size
+            d_cond = 1
         ).cuda(args.device)
 
         self.diffuser = DenoisingDiffusion(
@@ -80,27 +80,53 @@ class Configs:
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
 
         if not args.debug:
-            self.tb_writer = SummaryWriter(log_dir='/media/bamf-big/gefan/DiffFluids/logs/' + args.dataset +'/')
+            self.tb_writer = SummaryWriter(log_dir='/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/logs/' + args.dataset +'/')
 
+        if args.dataset == 'smoke_small':
+            self.init_seed = torch.randn((4, 1, 64, 64)).cuda(args.device)
+            self.init_cond = torch.tensor([[10.0, 6.0, 6.0],
+                                      [20.0, 23.0, 6.0],
+                                      [30.0, 40.0, 23.0],
+                                      [40.0, 58.0, 40.0]]).unsqueeze(1).cuda(args.device)
+        else:
+            raise NotImplementedError('Only smoke_small dataset is supported now.')
         logging.info('Configs initialized')
     
     def train(self):
         for epoch in range(1 + self.args.epochs):
             self.diffuser.eps_model.train()
-            self.scheduler.step(epoch)
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             for i, batch in enumerate(pbar):
-                density = batch[0].cuda(self.device)
-                cond = batch[-1].cuda(self.device)
-                loss = self.diffuser.ddpm_loss(x0=density, noise=None, cond=cond)
+                density = batch[0].cuda(self.args.device)
+                cond = batch[-1].unsqueeze(1).cuda(self.args.device)
+                loss = self.diffuser.ddpm_loss(x0=density, cond=cond)
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                pbar.set_postfix({'loss': loss.item()})
+                pbar.set_description(f'loss: {loss.item():.3f}')
                 if not self.args.debug:
                     self.tb_writer.add_scalar('loss', loss.item(), epoch * len(self.dataloader) + i)
-
-
+            if (epoch % 5 == 0 or epoch == self.args.epochs) and not self.args.debug:
+                with torch.no_grad():
+                    x = self.init_seed
+                    cond = self.init_cond
+                    for t_ in range(self.n_steps):
+                        t = self.n_steps - t_ - 1
+                        x = self.diffuser.p_sample(x, x.new_full((x.shape[0],), t, dtype=torch.long), cond)
+                fig, ax = plt.subplots(1, 4, figsize=(20, 5))
+                for i in range(4):
+                    ax[i].imshow(x[i, 0].detach().cpu().numpy(), cmap='gray', origin='lower')
+                    cond_ = cond[i, 0].detach().cpu().numpy()
+                    ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
+                    ax[i].axis('off')
+                self.tb_writer.add_figure('sample', fig, epoch)
+                logging.info(f"Evaluating at epoch {epoch}")
+                plt.close(fig)
+            self.scheduler.step()
+        torch.save(self.diffuser.eps_model.state_dict(), f'/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/checkpoint/{self.args.dataset}_condUnet.pt')
+        logging.info('Training finished')
+        self.tb_writer.close()
+                        
 if __name__ == '__main__':
     args = parse.parse_args()
     configs = Configs(args)

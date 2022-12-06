@@ -25,7 +25,7 @@ class MyDataSet(Dataset):
         self.velocity = torch.from_numpy(self.data['log_velocity']).float().flatten(start_dim=0, end_dim=1).permute(0, 3, 1, 2)
         self.conditions = torch.from_numpy(self.data['log_condition']).float().flatten(start_dim=0, end_dim=1)
         self.transform = transforms.Compose([
-            transforms.normalize(mean=[0.5], std=[0.5]) if normalized else transforms.ToTensor()
+            transforms.Normalize(mean=[0.5], std=[0.5]) if normalized else transforms.Lambda(lambda x: x)
         ])
         self.density = self.transform(self.density)
 

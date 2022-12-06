@@ -28,16 +28,14 @@ class DenoisingDiffusion:
         var = 1 - gather(self.alpha_bar, t)
         return (mean, var)
     
-    def q_sample(self, x0: torch.Tensor, t: torch.Tensor, eps: Optional[torch.Tensor]) -> torch.Tensor:
-        if eps is None:
-            eps = torch.randn_like(x0)
+    def q_sample(self, x0: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         mean, var = self.q_xt_x0(x0, t)
-        return mean + (var ** 0.5) * eps
+        return mean + (var ** 0.5) * torch.randn_like(x0)
 
-    def p_xtminus1_xt(self, x_t: torch.Tensor, t: torch.Tensor) -> Tuple:
+    def p_xtminus1_xt(self, x_t: torch.Tensor, t: torch.Tensor, cond: Optional[torch.Tensor]=None) -> Tuple:
         var = gather(self.sigma2, t)
 
-        eps_pred = self.eps_model(x_t, t)
+        eps_pred = self.eps_model(x_t, t, cond)
         alpha_bar = gather(self.alpha_bar, t)
         alpha = gather(self.alpha, t)
         eps_coeff = (1 - alpha) / ((1 - alpha_bar) ** 0.5)
@@ -45,21 +43,18 @@ class DenoisingDiffusion:
 
         return (mean, var)
     
-    def p_sample(self, x_t: torch.Tensor, t: torch.Tensor, eps: Optional[torch.Tensor]) -> torch.Tensor:
-        if eps is None:
-            eps = torch.randn_like(x_t)
-        mean, var = self.p_xtminus1_xt(x_t, t)
-        return mean + (var ** 0.5) * eps
+    def p_sample(self, x_t: torch.Tensor, t: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
+        mean, var = self.p_xtminus1_xt(x_t, t, cond)
+        return mean + (var ** 0.5) * torch.randn_like(x_t)
 
-    def ddpm_loss(self, x0: torch.Tensor, noise: Optional[torch.Tensor]=None, cond: torch.Tensor=None) -> torch.Tensor:
+    def ddpm_loss(self, x0: torch.Tensor, cond: torch.Tensor=None) -> torch.Tensor:
         
         batch_size = x0.shape[0]
         t = torch.randint(0, self.n_steps, (batch_size,), device=self.device, dtype=torch.long)
 
-        if noise is None:
-            noise = torch.randn_like(x0)
+        noise = torch.randn_like(x0)
         
-        x_t = self.q_sample(x0, t, eps=None)
+        x_t = self.q_sample(x0, t)
         eps_pred = self.eps_model(x_t, t, cond)
         return F.mse_loss(noise, eps_pred)
         
