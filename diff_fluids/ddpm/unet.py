@@ -256,6 +256,31 @@ class UNetModel(nn.Module):
         pe = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
         return pe
     
+    def pos_embedding(self, pos_x: torch.Tensor, pos_y: torch.Tensor, max_period: int=1000) -> torch.Tensor:
+        """ Same strategy for embedding the position
+
+        Args:
+            pos_x (torch.Tensor): source position x, with shape (batch_size)
+            pos_y (torch.Tensor): source position y, with shape (batch_size)
+            max_period (int, optional): minimum frequency of the embedding, can be smaller since we don't need so precise as time right now. Defaults to 1000.
+
+        Returns:
+            torch.Tensor: position embedding with shape (batch_size, 2, d_pos_emb), 2 for x and y
+        """
+        half = self.channels // 2
+        freqs = torch.exp(
+            math.log(max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
+        ).to(device=pos_x.device)
+
+        args_x = pos_x[:, None].float() * freqs[None]
+        args_y = pos_y[:, None].float() * freqs[None]
+        pe_x = torch.cat([torch.sin(args_x), torch.cos(args_x)], dim=-1)
+        # switch the order of sin and cos to represent different axis
+        pe_y = torch.cat([torch.cos(args_y), torch.sin(args_y)], dim=-1)
+        pe = torch.stack([pe_x, pe_y], dim=1)
+        return pe
+
+
     def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
         """ forward pass
 
@@ -309,24 +334,56 @@ def _test_time_step_embedding():
     plt.colorbar()
     plt.show()
 
+def _test_pos_embedding():
+    import matplotlib.pyplot as plt
+    unet = UNetModel(in_channels=1,
+                    out_channels=1,
+                    channels=64, 
+                    channel_multpliers=[],
+                    n_res_blocks=1,
+                    attention_levels=[],
+                    n_heads=1,
+                    transformer_layers=1,
+                    d_cond=1)
+    x_ranges = torch.linspace(0, 64, 641)
+    y_ranges = torch.linspace(0, 64, 641)
+    pos_emb = unet.pos_embedding(x_ranges, y_ranges)
+    plt.figure()
+    plt.subplot(1, 2, 1)
+    plt.imshow(pos_emb.detach().numpy()[:, 0, :], cmap='jet', aspect='auto', origin='lower')
+    plt.xlabel('Dimension')
+    plt.ylabel('Position x')
+    plt.title('Embedding for Position x')
+    plt.colorbar()
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(pos_emb.detach().numpy()[:, 1, :], cmap='jet', aspect='auto', origin='lower')
+    plt.xlabel('Dimension')
+    plt.ylabel('Position y')
+    plt.title('Embedding for Position y')
+    plt.colorbar()
+
+    plt.show()
+
 def _test_unet():
-    unet = UNetModel(in_channels=4,
-                     out_channels=4,
-                     channels=16,
-                     channel_multpliers=[1, 2, 4],
-                     n_res_blocks=1,
+    unet = UNetModel(in_channels=1,
+                     out_channels=1,
+                     channels=32,
+                     channel_multpliers=[1, 2, 4, 8],
+                     n_res_blocks=2,
                      attention_levels=[1, 2],
                      n_heads=4,
                      transformer_layers=1,
-                     d_cond=16)
+                     d_cond=3)
     # print(unet)
     # print(f"total params: {sum(p.numel() for p in unet.parameters())}")
-    input = torch.randn((2, 4, 4, 4))
+    input = torch.randn((2, 1, 64, 64))
     time_steps = torch.randn(2)
-    cond = torch.randn((2, 16, 3))
+    cond = torch.randn((2, 3, 32))
     output = unet(input, time_steps, cond=None)
     print(output.shape)
 
 if __name__ == "__main__":
-    _test_time_step_embedding()
-    # _test_unet()
+    # _test_time_step_embedding()
+    # _test_pos_embedding()
+    _test_unet()

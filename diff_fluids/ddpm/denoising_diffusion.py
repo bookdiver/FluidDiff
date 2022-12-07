@@ -22,7 +22,24 @@ class DenoisingDiffusion:
         self.alpha_bar = torch.cumprod(self.alpha, dim=0)
         self.sigma2 = self.beta
     
+    def get_cond_embedding(self, cond: torch.Tensor) -> torch.Tensor:
+        """ Encode the condition into an embedding. Specifically, cond includes (real_time, src_pos_x, src_pos_y), with each one of them is 
+        a scalar. What we need to do is for real_time, we use the same way as we embed the diffusion time. For src_pos_x and src_pos_y, 
+        we follow the same strategy for each one of them. After that, we concatenate the embeddings of real_time, src_pos_x and src_pos_y, and 
+        form an embedding with size of (B, 3, d_emb)
 
+        Args:
+            cond (torch.Tensor): original condition tensor with size of (B, 3)
+
+        Returns:
+            torch.Tensor: condition embedding with size of (B, 3, d_emb)
+        """
+        real_time, src_pos_x, src_pos_y = cond[:, 0], cond[:, 1], cond[:, 2]
+        real_time_emb = self.eps_model.time_step_embedding(real_time).unsqueeze(1)
+        src_pos_emb = self.eps_model.pos_embedding(src_pos_x, src_pos_y)
+        cond_emb = torch.cat([real_time_emb, src_pos_emb], dim=1)
+        return cond_emb
+    
     def q_xt_x0(self, x0: torch.Tensor, t: torch.Tensor) -> Tuple:
         mean = (gather(self.alpha_bar, t) ** 0.5) * x0
         var = 1 - gather(self.alpha_bar, t)
