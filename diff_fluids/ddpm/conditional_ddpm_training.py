@@ -10,7 +10,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from utils import MyDataSet
-from unet import UNetModel
+from DiffFluids.diff_fluids.ddpm.unet_with_xattn import UNetModel
 from denoising_diffusion import DenoisingDiffusion
 
 matplotlib.use('Agg')
@@ -27,6 +27,7 @@ parse.add_argument('--epochs', type=int, default=20, help='number of epochs, def
 parse.add_argument('--batch-size', type=int, default=16, help='batch size, default: 16')
 
 parse.add_argument('--debug', action='store_true', help='debug mode, default False')
+parse.add_argument('--conditional', action='store_true', help='conditional mode, default False')
 
 class Configs:
     eps_model: UNetModel
@@ -40,7 +41,7 @@ class Configs:
     n_heads: int=4
     transformer_layers: int=1
     n_steps: int=1000
-    lr: float=2e-5
+    lr: float=2e-4
     lrf: float=0.1
     dataset: MyDataSet
     data_loader: DataLoader
@@ -63,7 +64,7 @@ class Configs:
             attention_levels = self.attention_levels,
             n_heads = self.n_heads,
             transformer_layers = self.transformer_layers,
-            d_cond = 1
+            d_cond = 3
         ).cuda(args.device)
 
         self.diffuser = DenoisingDiffusion(
@@ -84,10 +85,11 @@ class Configs:
 
         if args.dataset == 'smoke_small':
             self.init_seed = torch.randn((4, 1, 64, 64)).cuda(args.device)
+            # inital condition for testing [t,    x,    y]
             self.init_cond = torch.tensor([[10.0, 6.0, 6.0],
-                                      [20.0, 23.0, 6.0],
-                                      [30.0, 40.0, 23.0],
-                                      [40.0, 58.0, 40.0]]).unsqueeze(1).cuda(args.device)
+                                           [20.0, 23.0, 6.0],
+                                           [30.0, 40.0, 23.0],
+                                           [40.0, 58.0, 40.0]]).cuda(args.device) if args.conditional else None
         else:
             raise NotImplementedError('Only smoke_small dataset is supported now.')
         logging.info('Configs initialized')
@@ -95,32 +97,30 @@ class Configs:
     def train(self):
         for epoch in range(1 + self.args.epochs):
             self.diffuser.eps_model.train()
+            cum_loss = 0
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             for i, batch in enumerate(pbar):
                 density = batch[0].cuda(self.args.device)
-                cond = batch[-1].unsqueeze(1).cuda(self.args.device)
+                cond = self.diffuser.get_cond_embedding(batch[-1]).cuda(self.args.device) if self.args.conditional else None
                 loss = self.diffuser.ddpm_loss(x0=density, cond=cond)
+                cum_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                pbar.set_description(f'loss: {loss.item():.3f}')
+                pbar.set_description(f'loss: {(cum_loss/(i+1)):.3f}')
                 if not self.args.debug:
                     self.tb_writer.add_scalar('loss', loss.item(), epoch * len(self.dataloader) + i)
             if (epoch % 5 == 0 or epoch == self.args.epochs) and not self.args.debug:
-                with torch.no_grad():
-                    x = self.init_seed
-                    cond = self.init_cond
-                    for t_ in range(self.n_steps):
-                        t = self.n_steps - t_ - 1
-                        x = self.diffuser.p_sample(x, x.new_full((x.shape[0],), t, dtype=torch.long), cond)
+                logging.info(f"Evaluating at epoch {epoch}")
+                x_pred = self.diffuser.sample(self.init_seed, self.init_cond)
                 fig, ax = plt.subplots(1, 4, figsize=(20, 5))
                 for i in range(4):
-                    ax[i].imshow(x[i, 0].detach().cpu().numpy(), cmap='gray', origin='lower')
-                    cond_ = cond[i, 0].detach().cpu().numpy()
-                    ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
+                    ax[i].imshow(x_pred[i, 0].detach().cpu().numpy(), cmap='gray', origin='lower')
+                    if self.args.conditional:
+                        cond_ = self.init_cond[i, 0].detach().cpu().numpy()
+                        ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
                     ax[i].axis('off')
                 self.tb_writer.add_figure('sample', fig, epoch)
-                logging.info(f"Evaluating at epoch {epoch}")
                 plt.close(fig)
             self.scheduler.step()
         torch.save(self.diffuser.eps_model.state_dict(), f'/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/checkpoint/{self.args.dataset}_condUnet.pt')
@@ -131,6 +131,8 @@ if __name__ == '__main__':
     args = parse.parse_args()
     configs = Configs(args)
     configs.train()
+    # x = configs.diffuser.sample(configs.init_seed, configs.init_cond)
+    # print(x.shape)
 
 
 

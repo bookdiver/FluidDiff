@@ -17,7 +17,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 from DiffFluids.diff_fluids.ddpm.utils import MyDataSet
-from DiffFluids.diff_fluids.ddpm.ddpm import DDPM
+from DiffFluids.diff_fluids.ddpm.stable_diffuser_ddpm import DDPM
 
 dataset_name = ['smoke_small', 'smoke_medium', 'smoke_large']
 device_ids = [0, 1, -1]

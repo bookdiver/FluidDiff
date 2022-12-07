@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from unet import UNetModel
+from DiffFluids.diff_fluids.ddpm.unet_with_xattn import UNetModel
 from diff_fluids.vae.vae import Autoencoder
 
 class LatentDiffusion(nn.Module):

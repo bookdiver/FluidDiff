@@ -30,6 +30,19 @@ class FeedForward(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 
+class AttnBlock(nn.Module):
+    def __init__(self, d_model: int, n_heads: int, d_head: int):
+        """ Simple self-attention
+
+        Args:
+            d_model (int): _description_
+            n_heads (int): _description_
+            d_head (int): _description_
+
+        Returns:
+            _type_: _description_
+        """        
+
 class CrossAttnBlock(nn.Module):
     def __init__(self, d_model: int, d_cond: int, n_heads: int, d_head: int, is_inplace: bool=True):
         """ Cross Attention Block

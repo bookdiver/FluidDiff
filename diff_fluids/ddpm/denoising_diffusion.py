@@ -74,5 +74,14 @@ class DenoisingDiffusion:
         x_t = self.q_sample(x0, t)
         eps_pred = self.eps_model(x_t, t, cond)
         return F.mse_loss(noise, eps_pred)
+    
+    @torch.no_grad()
+    def sample(self, x_seed: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
+        x_t = x_seed
+        cond_emb = self.get_cond_embedding(cond) if cond is not None else None
+        for t_ in range(self.n_steps):
+            t = self.n_steps - t_ - 1
+            x_t = self.p_sample(x_t, x_t.new_full((x_t.shape[0], ), t, dtype=torch.long), cond_emb)
+        return x_t
         
         

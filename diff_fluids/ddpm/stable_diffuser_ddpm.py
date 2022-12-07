@@ -20,8 +20,8 @@ class DDPM(nn.Module):
         """
         self.net = UNet2DModel(in_channels=in_channels,
                                    out_channels=in_channels,
-                                   down_block_types=("DownBlock2D", "DownBlock2D", "DownBlock2D", "DownBlock2D"),
-                                   up_block_types=("UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"),
+                                   down_block_types=("DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
+                                   up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
                                    block_out_channels=(64, 128, 256, 512)
             )
         self.betas = betas
@@ -99,3 +99,7 @@ class DDPM(nn.Module):
                 x = self.oneover_sqrta[i] * (x - noise * self.mab_over_sqrtmab[i]) + self.sqrt_beta_t[i] * z
             
         return x
+
+if __name__ == '__main__':
+    ddpm = DDPM(in_channels=1, betas=[1e-4, 0.02], n_T=500)
+    print(f'Number of parameters: {sum(p.numel() for p in ddpm.net.parameters())}')
