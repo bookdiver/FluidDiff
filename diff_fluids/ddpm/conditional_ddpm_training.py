@@ -1,6 +1,7 @@
 import argparse
 import logging
 import math
+from typing import Union
 
 import torch
 from torch.utils.data import DataLoader
@@ -9,8 +10,8 @@ from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
 
-from utils import MyDataSet
-from DiffFluids.diff_fluids.ddpm.unet_with_xattn import UNetModel
+from utils import FluidDataSet
+from unet import UNet, UNetXAttn
 from denoising_diffusion import DenoisingDiffusion
 
 matplotlib.use('Agg')
@@ -27,23 +28,23 @@ parse.add_argument('--epochs', type=int, default=20, help='number of epochs, def
 parse.add_argument('--batch-size', type=int, default=16, help='batch size, default: 16')
 
 parse.add_argument('--debug', action='store_true', help='debug mode, default False')
-parse.add_argument('--conditional', action='store_true', help='conditional mode, default False')
+parse.add_argument('--xattention', action='store_true', help='use cross attention, default False')
 
 class Configs:
-    eps_model: UNetModel
+    eps_model: Union[UNet, UNetXAttn]
     diffuser: DenoisingDiffusion
     in_channels: int=1
     out_channels: int=1
     channels: int=32
     channel_multpliers: list=[1, 2, 4, 8]
     n_res_blocks: int=2
-    attention_levels: list=[1, 2]
+    attention_levels: list=[0, 1, 2]
     n_heads: int=4
     transformer_layers: int=1
     n_steps: int=1000
     lr: float=2e-4
     lrf: float=0.1
-    dataset: MyDataSet
+    dataset: FluidDataSet
     data_loader: DataLoader
     optimizer: torch.optim.Adam
     tb_writer = SummaryWriter
@@ -55,17 +56,29 @@ class Configs:
         
         self.args = args
 
-        self.eps_model = UNetModel(
-            in_channels = self.in_channels,
-            out_channels = self.out_channels,
-            channels = self.channels,
-            channel_multpliers = self.channel_multpliers,
-            n_res_blocks = self.n_res_blocks,
-            attention_levels = self.attention_levels,
-            n_heads = self.n_heads,
-            transformer_layers = self.transformer_layers,
-            d_cond = 3
-        ).cuda(args.device)
+        if args.xattention:
+            self.eps_model = UNetXAttn(
+                in_channels = self.in_channels,
+                out_channels = self.out_channels,
+                channels = self.channels,
+                channel_multpliers = self.channel_multpliers,
+                n_res_blocks = self.n_res_blocks,
+                attention_levels = self.attention_levels,
+                n_heads = self.n_heads,
+                transformer_layers = self.transformer_layers,
+                cond_channels = 3
+            ).cuda(args.device)
+        else:
+            self.eps_model = UNet(
+                in_channels = self.in_channels,
+                out_channels = self.out_channels,
+                channels = self.channels,
+                channel_multpliers = self.channel_multpliers,
+                n_res_blocks = self.n_res_blocks,
+                attention_levels = self.attention_levels,
+                n_heads = self.n_heads,
+                cond_channels = 3
+            ).cuda(args.device)
 
         self.diffuser = DenoisingDiffusion(
             eps_model=self.eps_model,
@@ -73,7 +86,7 @@ class Configs:
             device = args.device
         )
 
-        self.dataset = MyDataSet(args.data_root, args.dataset)
+        self.dataset = FluidDataSet(args.data_root, args.dataset)
         self.dataloader = DataLoader(self.dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
         self.optimizer = torch.optim.Adam(self.diffuser.eps_model.parameters(), lr=self.lr)
@@ -89,7 +102,7 @@ class Configs:
             self.init_cond = torch.tensor([[10.0, 6.0, 6.0],
                                            [20.0, 23.0, 6.0],
                                            [30.0, 40.0, 23.0],
-                                           [40.0, 58.0, 40.0]]).cuda(args.device) if args.conditional else None
+                                           [40.0, 58.0, 40.0]]).cuda(args.device)
         else:
             raise NotImplementedError('Only smoke_small dataset is supported now.')
         logging.info('Configs initialized')
@@ -101,7 +114,7 @@ class Configs:
             pbar = tqdm(self.dataloader, desc=f'Epoch {epoch}')
             for i, batch in enumerate(pbar):
                 density = batch[0].cuda(self.args.device)
-                cond = self.diffuser.get_cond_embedding(batch[-1]).cuda(self.args.device) if self.args.conditional else None
+                cond = batch[-1].cuda(self.args.device)
                 loss = self.diffuser.ddpm_loss(x0=density, cond=cond)
                 cum_loss += loss.item()
                 self.optimizer.zero_grad()
@@ -116,9 +129,8 @@ class Configs:
                 fig, ax = plt.subplots(1, 4, figsize=(20, 5))
                 for i in range(4):
                     ax[i].imshow(x_pred[i, 0].detach().cpu().numpy(), cmap='gray', origin='lower')
-                    if self.args.conditional:
-                        cond_ = self.init_cond[i, 0].detach().cpu().numpy()
-                        ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
+                    cond_ = self.init_cond[i, 0].detach().cpu().numpy()
+                    ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
                     ax[i].axis('off')
                 self.tb_writer.add_figure('sample', fig, epoch)
                 plt.close(fig)
@@ -131,8 +143,6 @@ if __name__ == '__main__':
     args = parse.parse_args()
     configs = Configs(args)
     configs.train()
-    # x = configs.diffuser.sample(configs.init_seed, configs.init_cond)
-    # print(x.shape)
 
 
 

@@ -1,10 +1,13 @@
+import math
+
 import torch
+import torch.nn as nn
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
 
 
-class MyDataSet(Dataset):
+class FluidDataSet(Dataset):
     """ 
     Customized dataset for smoke simulation, the data npz file should contain the following keys:
     'log_params': dict of simulation parameters
@@ -37,4 +40,8 @@ class MyDataSet(Dataset):
     
     def __len__(self) -> int:
         return self.density.shape[0]
+    
+
+
+
     
