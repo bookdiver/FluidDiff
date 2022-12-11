@@ -87,7 +87,6 @@ class ResBlock(nn.Module):
         if out_channels is None:
             out_channels = in_channels
 
-
         self.emb_mlp = nn.Sequential(
             nn.SiLU(),
             nn.Linear(d_emb, 2 * out_channels)
@@ -274,3 +273,29 @@ class BasicUNet(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         pass
     
+def _test_time_step_embedding():
+    import matplotlib.pyplot as plt
+    block = TimeEmbeddingBlock(d_emb=128, max_period=10000)
+    time_steps1 = torch.arange(0, 1000)
+    time_steps2 = torch.arange(0, 1000) / 1000.0
+    t_emb1 = block(time_steps1)
+    t_emb2 = block(time_steps2)
+    plt.figure()
+    plt.subplot(1, 2, 1)
+    plt.imshow(t_emb1.detach().numpy(), cmap='jet', aspect='auto', origin='lower')
+    plt.xlabel('Dimension')
+    plt.ylabel('Diffusion Time')
+    plt.title('Fouriour Features for Diffusion Time (Unnormalized)')
+    plt.colorbar()
+
+    plt.subplot(1, 2, 2)
+    plt.imshow(t_emb2.detach().numpy(), cmap='jet', aspect='auto', origin='lower')
+    plt.xlabel('Dimension')
+    plt.ylabel('Diffusion Time')
+    plt.title('Fouriour Features for Diffusion Time (Normalized)')
+    plt.colorbar()
+
+    plt.show()
+
+if __name__ == '__main__':
+    _test_time_step_embedding()

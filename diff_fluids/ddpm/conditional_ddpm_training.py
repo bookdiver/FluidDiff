@@ -10,8 +10,6 @@ from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
 
-from diffusers import UNet2DModel
-
 from utils import FluidDataSet
 from unet import UNet, UNetXAttn
 from denoising_diffusion import DenoisingDiffusion
@@ -81,13 +79,6 @@ class Configs:
                 n_heads = self.n_heads,
                 cond_channels = 3
             ).cuda(args.device)
-        # self.eps_model = UNet2DModel(
-        #     in_channels=1,
-        #     out_channels=1,
-        #     down_block_types=("DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
-        #     up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
-        #     block_out_channels=(64, 128, 256, 512)
-        # ).cuda(args.device)
 
         self.diffuser = DenoisingDiffusion(
             eps_model=self.eps_model,

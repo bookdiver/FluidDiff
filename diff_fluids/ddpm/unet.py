@@ -270,58 +270,6 @@ class UNetXAttn(BasicUNet):
         
         return self.out(x)
 
-def _test_time_step_embedding():
-    import matplotlib.pyplot as plt
-    unet = UNetXAttn(in_channels=1,
-                    out_channels=1,
-                    channels=64, 
-                    channel_multpliers=[],
-                    n_res_blocks=1,
-                    attention_levels=[],
-                    n_heads=1,
-                    transformer_layers=1,
-                    d_cond=1)
-    time_steps = torch.arange(0, 1000)
-    t_emb = unet.time_step_embedding(time_steps)
-    plt.figure()
-    plt.imshow(t_emb.detach().numpy(), cmap='jet', aspect='auto', origin='lower')
-    plt.xlabel('Dimension')
-    plt.ylabel('Diffusion Time')
-    plt.title('Fouriour Features for Diffusion Time')
-    plt.colorbar()
-    plt.show()
-
-def _test_pos_embedding():
-    import matplotlib.pyplot as plt
-    unet = UNetXAttn(in_channels=1,
-                    out_channels=1,
-                    channels=64, 
-                    channel_multpliers=[],
-                    n_res_blocks=1,
-                    attention_levels=[],
-                    n_heads=1,
-                    transformer_layers=1,
-                    d_cond=1)
-    x_ranges = torch.linspace(0, 64, 641)
-    y_ranges = torch.linspace(0, 64, 641)
-    pos_emb = unet.pos_embedding(x_ranges, y_ranges)
-    plt.figure()
-    plt.subplot(1, 2, 1)
-    plt.imshow(pos_emb.detach().numpy()[:, 0, :], cmap='jet', aspect='auto', origin='lower')
-    plt.xlabel('Dimension')
-    plt.ylabel('Position x')
-    plt.title('Embedding for Position x')
-    plt.colorbar()
-
-    plt.subplot(1, 2, 2)
-    plt.imshow(pos_emb.detach().numpy()[:, 1, :], cmap='jet', aspect='auto', origin='lower')
-    plt.xlabel('Dimension')
-    plt.ylabel('Position y')
-    plt.title('Embedding for Position y')
-    plt.colorbar()
-
-    plt.show()
-
 def _test_unet():
     unet = UNet(in_channels=1,
                 out_channels=1,
@@ -358,7 +306,5 @@ def _test_xunet():
     print(output.shape)
 
 if __name__ == "__main__":
-    # _test_time_step_embedding()
-    # _test_pos_embedding()
     _test_unet()
     # _test_xunet()
