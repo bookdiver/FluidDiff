@@ -50,14 +50,17 @@ class UNet(BasicUNet):
             nn.Linear(d_time_emb, d_time_emb)
         )
 
-        d_cond_emb = cond_channels * emb_dim
-        self.cond_embedding_mlp = nn.Sequential(
-            ConditionEmbeddingBlock(channels),
-            nn.Flatten(),
-            nn.Linear(cond_channels * channels, d_cond_emb),
-            nn.SiLU(),
-            nn.Linear(d_cond_emb, d_cond_emb)
-        )
+        if cond_channels > 0:
+            d_cond_emb = cond_channels * emb_dim
+            self.cond_embedding_mlp = nn.Sequential(
+                ConditionEmbeddingBlock(channels),
+                nn.Flatten(),
+                nn.Linear(cond_channels * channels, d_cond_emb),
+                nn.SiLU(),
+                nn.Linear(d_cond_emb, d_cond_emb)
+            )
+        else:
+            self.cond_embedding_mlp = None
 
         self.input_blocks = nn.ModuleList([])
         self.input_blocks.append(UniversialEmbedSequential(
@@ -68,7 +71,7 @@ class UNet(BasicUNet):
         
         for i in range(n_levels):
             for _ in range(n_res_blocks):
-                layers = [ResBlock(channels, 4*emb_dim, out_channels=channels_list[i])]
+                layers = [ResBlock(channels, (cond_channels+1)*emb_dim, out_channels=channels_list[i])]
                 channels = channels_list[i]
 
                 input_block_channels.append(channels)
@@ -84,16 +87,16 @@ class UNet(BasicUNet):
             
         
         self.middle_block = UniversialEmbedSequential(
-            ResBlock(channels, 4*emb_dim),
+            ResBlock(channels, (cond_channels+1)*emb_dim),
             Residual(PreNorm(channels, AttnBlock(channels, n_heads=8, d_head=32))),
-            ResBlock(channels, 4*emb_dim)
+            ResBlock(channels, (cond_channels+1)*emb_dim)
         )
 
         self.output_blocks = nn.ModuleList([])
         for i in reversed(range(n_levels)):
             
             for j in range(n_res_blocks+1):
-                layers = [ResBlock(channels+input_block_channels.pop(), 4*emb_dim, out_channels=channels_list[i])]
+                layers = [ResBlock(channels+input_block_channels.pop(), (cond_channels+1)*emb_dim, out_channels=channels_list[i])]
                 channels = channels_list[i]
                 
                 if i in attention_levels:
@@ -110,7 +113,7 @@ class UNet(BasicUNet):
             nn.Conv2d(channels, out_channels, kernel_size=1)
         )
 
-    def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
         """ Forward pass of the UNet
 
         Args:
@@ -124,8 +127,11 @@ class UNet(BasicUNet):
         x_input_block = []
 
         t_emb = self.time_embedding_mlp(time_steps).unsqueeze(1)
-        c_emb = self.cond_embedding_mlp(cond).reshape(x.shape[0], cond.shape[-1], -1)
-        emb = torch.cat([t_emb, c_emb], dim=1).flatten(start_dim=1)
+        if cond is not None:
+            c_emb = self.cond_embedding_mlp(cond).reshape(x.shape[0], cond.shape[-1], -1)
+            emb = torch.cat([t_emb, c_emb], dim=1).flatten(start_dim=1)
+        else:
+            emb = t_emb.flatten(start_dim=1)
 
         for module in self.input_blocks:
             x = module(x, emb)
@@ -324,13 +330,13 @@ def _test_unet():
                 n_res_blocks=2,
                 attention_levels=[0, 1, 2],
                 n_heads=8,
-                cond_channels=3)
+                cond_channels=0)
     # print(unet)
     print(f"total params: {sum(p.numel() for p in unet.parameters())}")
     input = torch.randn((2, 1, 64, 64))
     time_steps = torch.randn(2)
-    cond = torch.randn((2, 3))
-    output = unet(input, time_steps, cond)
+    # cond = torch.randn((2, 3))
+    output = unet(input, time_steps, cond=None)
     print(output.shape)
 
 def _test_xunet():
@@ -355,4 +361,4 @@ if __name__ == "__main__":
     # _test_time_step_embedding()
     # _test_pos_embedding()
     _test_unet()
-    _test_xunet()
+    # _test_xunet()

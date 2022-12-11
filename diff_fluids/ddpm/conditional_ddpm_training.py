@@ -10,6 +10,8 @@ from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
 
+from diffusers import UNet2DModel
+
 from utils import FluidDataSet
 from unet import UNet, UNetXAttn
 from denoising_diffusion import DenoisingDiffusion
@@ -79,12 +81,19 @@ class Configs:
                 n_heads = self.n_heads,
                 cond_channels = 3
             ).cuda(args.device)
+        # self.eps_model = UNet2DModel(
+        #     in_channels=1,
+        #     out_channels=1,
+        #     down_block_types=("DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
+        #     up_block_types=("AttnUpBlock2D", "AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D"),
+        #     block_out_channels=(64, 128, 256, 512)
+        # ).cuda(args.device)
 
         self.diffuser = DenoisingDiffusion(
             eps_model=self.eps_model,
             n_steps=self.n_steps,
             device = args.device
-        )
+        ).cuda(args.device)
 
         self.dataset = FluidDataSet(args.data_root, args.dataset)
         self.dataloader = DataLoader(self.dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
@@ -115,7 +124,7 @@ class Configs:
             for i, batch in enumerate(pbar):
                 density = batch[0].cuda(self.args.device)
                 cond = batch[-1].cuda(self.args.device)
-                loss = self.diffuser.ddpm_loss(x0=density, cond=cond)
+                loss = self.diffuser.ddpm_loss(density, cond)
                 cum_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -123,17 +132,17 @@ class Configs:
                 pbar.set_description(f'loss: {(cum_loss/(i+1)):.3f}')
                 if not self.args.debug:
                     self.tb_writer.add_scalar('loss', loss.item(), epoch * len(self.dataloader) + i)
-            if (epoch % 5 == 0 or epoch == self.args.epochs) and not self.args.debug:
-                logging.info(f"Evaluating at epoch {epoch}")
-                x_pred = self.diffuser.sample(self.init_seed, self.init_cond)
-                fig, ax = plt.subplots(1, 4, figsize=(20, 5))
-                for i in range(4):
-                    ax[i].imshow(x_pred[i, 0].detach().cpu().numpy(), cmap='gray', origin='lower')
-                    cond_ = self.init_cond[i, 0].detach().cpu().numpy()
-                    ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
-                    ax[i].axis('off')
-                self.tb_writer.add_figure('sample', fig, epoch)
-                plt.close(fig)
+            # if (epoch % 5 == 0 or epoch == self.args.epochs) and not self.args.debug:
+            #     logging.info(f"Evaluating at epoch {epoch}")
+            #     x_pred = self.diffuser.sample(self.init_seed, self.init_cond)
+            #     fig, ax = plt.subplots(1, 4, figsize=(20, 5))
+            #     for i in range(4):
+            #         ax[i].imshow(x_pred[i, 0].detach().cpu().numpy(), cmap='gray', origin='lower')
+            #         cond_ = self.init_cond[i, 0].detach().cpu().numpy()
+            #         ax[i].set_title(f't: {cond_[0]} s, x: {cond_[1]}, y: {cond_[2]}')
+            #         ax[i].axis('off')
+            #     self.tb_writer.add_figure('sample', fig, epoch)
+            #     plt.close(fig)
             self.scheduler.step()
         torch.save(self.diffuser.eps_model.state_dict(), f'/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/checkpoint/{self.args.dataset}_condUnet.pt')
         logging.info('Training finished')
