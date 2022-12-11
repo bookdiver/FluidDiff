@@ -1,7 +1,4 @@
-import math
-
 import torch
-import torch.nn as nn
 from torch.utils.data import Dataset
 from torchvision import transforms
 import numpy as np
@@ -40,6 +37,25 @@ class FluidDataSet(Dataset):
     
     def __len__(self) -> int:
         return self.density.shape[0]
+    
+    def find_idxs(self, conds: torch.Tensor) -> list:
+        """
+        Find the index of the frames with the given condition
+        """
+        idxs = []
+        for cond in conds:
+            idx = torch.where(torch.all(torch.eq(self.conditions, cond), dim=1))[0]
+            idxs.append(idx.item() if idx.shape[0] > 0 else None)
+        return idxs
+    
+    def get_ground_truths(self, idxs: list) -> list:
+        """
+        Get the ground truth of the frame with the given index
+        """
+        truths = []
+        for idx in idxs:
+            truths.append((self.density[idx], self.velocity[idx]))
+        return truths
     
 
 

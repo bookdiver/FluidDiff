@@ -25,7 +25,7 @@ class DenoisingDiffusion(nn.Module):
         self.n_steps = n_steps
         self.mse_loss = nn.MSELoss()
 
-        for k, v in self.ddpm_schedule().items():
+        for k, v in self.ddpm_schedule.items():
             self.register_buffer(k, v)
 
         self.device = device
@@ -100,7 +100,7 @@ class DenoisingDiffusion(nn.Module):
         cond = cond.to(self.device) if cond is not None else None
 
         for i in tqdm(range(self.n_steps, 0, -1)):
-            t_is = torch.tensor([i / self.n_steps]).to(self.device)
+            t_is = torch.tensor([i / self.n_steps]).repeat(x_t.shape[0]).to(self.device)
 
             z = torch.randn_like(x_t) if i > 1 else 0
 
