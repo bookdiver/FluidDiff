@@ -43,6 +43,7 @@ class Configs:
     dataset: FluidDataSet
     data_loader: DataLoader
     optimizer: torch.optim.Adam
+    eval_interval: int=10
     tb_writer: SummaryWriter
     data_root: str='/media/bamf-big/gefan/DiffFluids/data/smoke/'
     tb_writer_root: str='/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/logs/'
@@ -116,7 +117,7 @@ class Configs:
             raise NotImplementedError('Only smoke_small, smoke_medium, smoke_large are supported now.')
 
         self.dataset = FluidDataSet(self.data_root, dataset_name)
-        self.ground_truths = self.dataset.get_ground_truths(self.dataset.find_idxs(self.init_cond))
+        self.ground_truths = self.dataset.get_ground_truths(self.init_cond)
         self.dataloader = DataLoader(self.dataset, batch_size=args.batch_size, shuffle=True, num_workers=8, pin_memory=True)
 
         self.optimizer = torch.optim.Adam(self.diffuser.eps_model.parameters(), lr=self.lr)
@@ -124,6 +125,10 @@ class Configs:
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
 
         logging.info('Configs initialized')
+        logging.info(f'Dataset: {dataset_name}')
+        logging.info(f'Batch size: {args.batch_size}')
+        logging.info(f'Epochs: {args.epochs}')
+        logging.info(f'Epsilon model: {self.eps_model.__class__.__name__}')
     
     def train(self):
         for epoch in range(1 + self.args.epochs):
@@ -141,7 +146,7 @@ class Configs:
                 pbar.set_description(f'Epoch [{epoch}/{self.args.epochs}] | Loss: {(cum_loss/(i+1)):.3f}')
                 if not self.args.debug:
                     self.tb_writer.add_scalar('batch loss', loss.item(), epoch * len(self.dataloader) + i)
-            if (epoch % 5 == 0 or epoch == self.args.epochs) and not self.args.debug:
+            if (epoch % self.eval_interval == 0 or epoch == self.args.epochs) and not self.args.debug:
                 self.init_seed = self.init_seed.cuda(self.args.device)
                 self.init_cond = self.init_cond.cuda(self.args.device)
                 logging.info(f"Evaluating at epoch {epoch}, starting sampling...")

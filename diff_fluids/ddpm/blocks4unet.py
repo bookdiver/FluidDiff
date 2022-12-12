@@ -13,19 +13,6 @@ from transformer4unet import SpatialTransformer
 def exists(val):
     return val is not None
 
-def default(val, d):
-    if exists(val):
-        return val
-    return d() if callable(d) else d
-
-def num_to_groups(num: int, divisor: int) -> list:
-    groups = num // divisor
-    remainder = num % divisor
-    arr = [divisor] * groups
-    if remainder != 0:
-        arr.append(remainder)
-    return arr
-
 class Residual(nn.Module):
     def __init__(self, fn: callable):
         super().__init__()
