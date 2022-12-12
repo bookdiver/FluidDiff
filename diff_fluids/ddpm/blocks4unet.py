@@ -254,6 +254,9 @@ class ConditionEmbeddingBlock(nn.Module):
         ).to(device=condition.device)
 
         real_t, pos_x, pos_y = condition.chunk(3, dim=1)
+        # do the normalization on real time steps
+        real_t = real_t / 50.0
+        
         args = real_t[:, None].float() * freqs[None]
         pe_t = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
 

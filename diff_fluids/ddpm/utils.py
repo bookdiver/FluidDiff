@@ -38,23 +38,27 @@ class FluidDataSet(Dataset):
     def __len__(self) -> int:
         return self.density.shape[0]
     
-    def find_idxs(self, conds: torch.Tensor) -> list:
+    def find_idxs(self, conditions: torch.Tensor) -> list:
         """
         Find the index of the frames with the given condition
         """
         idxs = []
-        for cond in conds:
+        for cond in conditions:
             idx = torch.where(torch.all(torch.eq(self.conditions, cond), dim=1))[0]
             idxs.append(idx.item() if idx.shape[0] > 0 else None)
         return idxs
     
-    def get_ground_truths(self, idxs: list) -> list:
+    def get_ground_truths(self, conditions: torch.Tensor) -> list:
         """
         Get the ground truth of the frame with the given index
         """
+        idxs = self.find_idxs(conditions)
         truths = []
         for idx in idxs:
-            truths.append((self.density[idx], self.velocity[idx]))
+            if idx is None:
+                truths.append(None)
+            else:
+                truths.append((self.density[idx], self.velocity[idx]))
         return truths
     
 
