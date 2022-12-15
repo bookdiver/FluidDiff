@@ -10,303 +10,261 @@ from blocks4unet import *
 
 logging.basicConfig(level=logging.INFO)
 
-class UNet(BasicUNet):
+class UNet(nn.Module):
     def __init__(self,
                  *,
                  in_channels: int,
                  out_channels: int,
-                 channels: int,
-                 channel_multpliers: List[int],
-                 n_res_blocks: int,
-                 attention_levels: List[int],
-                 n_heads: int,
-                 cond_channels: int=3):
-        """ UNet model for approximating noise
+                 cascade_channels: list,
+                 condition_channels: int,
+                 embedding_size: int,
+                 down_blocks: list=["ResDownBlock", "AttnDownBlock", "AttnDownBlock", "AttnDownBlock"],
+                 middle_block_type: str = "AttnMidBlock",
+                 up_blocks: list=["AttnUpBlock", "AttnUpBlock", "AttnUpBlock", "ResUpBlock"],
+                 n_res_blocks: int=2,
+                 n_attn_heads: int=8,
+                 n_res_groups: int=8,
+                 n_attn_groups: int=16,
+                 n_transformer_layers: int=1,
+                 ) -> None:
+        """ A UNet model to predict the noise 
 
         Args:
-            in_channels (int): the input channel size
-            out_channels (int): the output channel size
-            channels (int): the initial channel size for the first convolution layer, also for the dimension of time embedding
-            channel_multpliers (List[int]): the channel multiplier for each level
-            n_res_blocks (int): the number of residual blocks in each level
-            attention_levels (List[int]): the levels where to apply attention at
-            n_heads (int): the number of heads for the attention
-            transformer_layers (int, optional): the number of transformer layers. Defaults to 1.
-            cond_channels (int, optional): the channel of the conditional embedding. Defaults to 3.
-        """
+            in_channels (int): input sample channels
+            out_channels (int): output sample channels
+            cascade_channels (list): the channels of each block
+            condition_channels (int): the channels of the condition, used when doing the cross attention
+            embedding_size (int): the size of the embedding, for both time and condition
+            down_blocks (list, optional): the down block types, can be chosen from ["ResDownBlock", "AttnDownBlock", "XAttnDownBlock"].
+            Defaults to ["ResDownBlock", "AttnDownBlock", "AttnDownBlock", "AttnDownBlock"].
+
+            middle_block_type (str, optional): the type of middle bottleneck block, can be chosen from ["ResMidBlock", "AttnMidBlock"]. Defaults to "AttnMidBlock".
+
+            up_blocks (list, optional): the up block types, can be chosen from ["ResUpBlock", "AttnUpBlock", "XAttnUpBlock"]. 
+            Defaults to ["AttnUpBlock", "AttnUpBlock", "AttnUpBlock", "ResUpBlock"].
+
+            n_res_blocks (int, optional): the number of residual block in each level, also the number of transformers when using attention. Defaults to 2.
+            n_attn_heads (int, optional): the number of attention heads. Defaults to 8.
+            n_res_groups (int, optional): the number of groups when do the group normalization in residual blocks. Defaults to 8.
+            n_attn_groups (int, optional): the number of groups when do the group normalization in attention blocks. Defaults to 16.
+            n_transformer_layers (int, optional): the number of transformer layer in attention blocks. Defaults to 1.
+        """        
         super().__init__()
-        self.channels = channels
+        n_levels = len(cascade_channels) - 1
+        assert n_levels == len(down_blocks) == len(up_blocks), "The number of levels should be equal to the number of down_blocks and up_blocks"
 
-        n_levels = len(channel_multpliers)
-        channels_list = [channels * m for m in channel_multpliers]
-
-        emb_dim = channels * 4
-
-        d_time_emb = emb_dim
-        self.time_embedding_mlp = nn.Sequential(
-            TimeEmbeddingBlock(channels),
-            nn.Linear(channels, d_time_emb),
-            nn.SiLU(),
-            nn.Linear(d_time_emb, d_time_emb)
+        # 1. embedding mlp for time and condition
+        self.time_embedding_mlp = get_embedding_block(
+            embedding_object="DiffusionStep",
+            embedding_size=cascade_channels[0],
+            embedding_channels=1,
+            out_size=embedding_size
         )
 
-        if cond_channels > 0:
-            d_cond_emb = cond_channels * emb_dim
-            self.cond_embedding_mlp = nn.Sequential(
-                ConditionEmbeddingBlock(channels),
-                nn.Flatten(),
-                nn.Linear(cond_channels * channels, d_cond_emb),
-                nn.SiLU(),
-                nn.Linear(d_cond_emb, d_cond_emb)
+        self.condition_embedding_mlp = get_embedding_block(
+            embedding_object="Condition",
+            embedding_size=cascade_channels[0],
+            embedding_channels=condition_channels,
+            out_size=embedding_size
+        )
+
+        # 2. initial convolution
+        self.in_conv = nn.Conv2d(in_channels, cascade_channels[0], kernel_size=3, padding=1)
+
+        # 3. down blocks
+        down_block_channels = []
+        self.down_blocks = nn.ModuleList([])
+
+        for i in range(n_levels):
+            is_last = (i == n_levels-1)
+            block_type = down_blocks[i]
+            if block_type == "ResDownBlock":
+                down_block = get_down_block(
+                    block_type='ResBlock',
+                    in_channels=cascade_channels[i],
+                    out_channels=cascade_channels[i+1],
+                    res_embedding_channels=1,
+                    res_embedding_size=embedding_size,
+                    xattn_channels=condition_channels,
+                    is_last=is_last,
+                    n_res_groups=n_res_groups,
+                    n_attn_groups=n_attn_groups,
+                    n_attn_heads=n_attn_heads,
+                    n_res_layers=n_res_blocks,
+                    n_transformer_layers=n_transformer_layers
+                )
+            elif block_type == "AttnDownBlock":
+                down_block = get_down_block(
+                    block_type='AttnBlock',
+                    in_channels=cascade_channels[i],
+                    out_channels=cascade_channels[i+1],
+                    res_embedding_channels=1,
+                    res_embedding_size=embedding_size,
+                    xattn_channels=condition_channels,
+                    is_last=is_last,
+                    n_res_groups=n_res_groups,
+                    n_attn_groups=n_attn_groups,
+                    n_attn_heads=n_attn_heads,
+                    n_res_layers=n_res_blocks,
+                    n_transformer_layers=n_transformer_layers
+                )
+            elif block_type == "XAttnDownBlock":
+                down_block = get_down_block(
+                    block_type='CrossAttnBlock',
+                    in_channels=cascade_channels[i],
+                    out_channels=cascade_channels[i+1],
+                    res_embedding_channels=1,
+                    res_embedding_size=embedding_size,
+                    xattn_channels=condition_channels,
+                    is_last=is_last,
+                    n_res_groups=n_res_groups,
+                    n_attn_groups=n_attn_groups,
+                    n_attn_heads=n_attn_heads,
+                    n_res_layers=n_res_blocks,
+                    n_transformer_layers=n_transformer_layers
+                )
+            else:
+                raise ValueError(f"Unknown block type {block_type}")
+            self.down_blocks.append(down_block)
+
+        # 4. middle block
+        if middle_block_type == "ResMidBlock":
+            self.middle_block = get_mid_block(
+                block_type='ResBlock',
+                channels=cascade_channels[-1],
+                res_embedding_channels=1,
+                res_embedding_size=embedding_size,
+                xattn_channels=None,
+                n_res_groups=n_res_groups,
+                n_attn_groups=n_attn_groups,
+                n_attn_heads=n_attn_heads,
+                n_res_layers=n_res_blocks,
+                n_transformer_layers=n_transformer_layers
+            )
+        elif middle_block_type == "AttnMidBlock":
+            self.middle_block = get_mid_block(
+                block_type='AttnBlock',
+                channels=cascade_channels[-1],
+                res_embedding_channels=1,
+                res_embedding_size=embedding_size,
+                xattn_channels=None,
+                n_res_groups=n_res_groups,
+                n_attn_groups=n_attn_groups,
+                n_attn_heads=n_attn_heads,
+                n_res_layers=n_res_blocks,
+                n_transformer_layers=n_transformer_layers
             )
         else:
-            self.cond_embedding_mlp = None
+            raise ValueError(f"Unknown block type {middle_block_type}")
 
-        self.input_blocks = nn.ModuleList([])
-        self.input_blocks.append(UniversialEmbedSequential(
-            nn.Conv2d(in_channels, channels, kernel_size=3, padding=1)
-        ))
+        # 5. up blocks
+        self.up_blocks = nn.ModuleList([])
 
-        input_block_channels = [channels]
-        
         for i in range(n_levels):
-            for _ in range(n_res_blocks):
-                layers = [ResBlock(channels, (cond_channels+1)*emb_dim, out_channels=channels_list[i])]
-                channels = channels_list[i]
-
-                input_block_channels.append(channels)
-            
-                if i in attention_levels:
-                    layers.append(Residual(PreNorm(channels, LinearAttnBlock(channels, n_heads=n_heads, d_head=32))))
-                
-                self.input_blocks.append(UniversialEmbedSequential(*layers))
-            
-            if i != n_levels - 1:
-                self.input_blocks.append(UniversialEmbedSequential(DownSample(channels)))
-                input_block_channels.append(channels)
-            
+            is_last = (i == 0)
+            block_type = up_blocks[i]
+            if block_type == "ResUpBlock":
+                up_block = get_up_block(
+                    block_type='ResBlock',
+                    in_channels=2*cascade_channels[-(i+1)] ,
+                    out_channels=cascade_channels[-(i+2)],
+                    res_embedding_channels=1,
+                    res_embedding_size=embedding_size,
+                    xattn_channels=condition_channels,
+                    is_last=is_last,
+                    n_res_groups=n_res_groups,
+                    n_attn_groups=n_attn_groups,
+                    n_attn_heads=n_attn_heads,
+                    n_res_layers=n_res_blocks,
+                    n_transformer_layers=n_transformer_layers
+                )
+            elif block_type == "AttnUpBlock":
+                up_block = get_up_block(
+                    block_type='AttnBlock',
+                    in_channels=2*cascade_channels[-(i+1)],
+                    out_channels=cascade_channels[-(i+2)],
+                    res_embedding_channels=1,
+                    res_embedding_size=embedding_size,
+                    xattn_channels=condition_channels,
+                    is_last=is_last,
+                    n_res_groups=n_res_groups,
+                    n_attn_groups=n_attn_groups,
+                    n_attn_heads=n_attn_heads,
+                    n_res_layers=n_res_blocks,
+                    n_transformer_layers=n_transformer_layers
+                )
+            elif block_type == "XAttnUpBlock":
+                up_block = get_up_block(
+                    block_type='CrossAttnBlock',
+                    in_channels=2*cascade_channels[-(i+1)],
+                    out_channels=cascade_channels[-(i+2)],
+                    res_embedding_channels=1,
+                    res_embedding_size=embedding_size,
+                    xattn_channels=condition_channels,
+                    is_last=is_last,
+                    n_res_groups=n_res_groups,
+                    n_attn_groups=n_attn_groups,
+                    n_attn_heads=n_attn_heads,
+                    n_res_layers=n_res_blocks,
+                    n_transformer_layers=n_transformer_layers
+                )
+            else:
+                raise ValueError(f"Unknown block type {block_type}")
+            self.up_blocks.append(up_block)
         
-        self.middle_block = UniversialEmbedSequential(
-            ResBlock(channels, (cond_channels+1)*emb_dim),
-            Residual(PreNorm(channels, AttnBlock(channels, n_heads=8, d_head=32))),
-            ResBlock(channels, (cond_channels+1)*emb_dim)
-        )
-
-        self.output_blocks = nn.ModuleList([])
-        for i in reversed(range(n_levels)):
-            
-            for j in range(n_res_blocks+1):
-                layers = [ResBlock(channels+input_block_channels.pop(), (cond_channels+1)*emb_dim, out_channels=channels_list[i])]
-                channels = channels_list[i]
-                
-                if i in attention_levels:
-                    layers.append(Residual(PreNorm(channels, LinearAttnBlock(channels, n_heads=8, d_head=32))))
-            
-                if i != 0 and j == n_res_blocks:
-                    layers.append(UpSample(channels))
-        
-                self.output_blocks.append(UniversialEmbedSequential(*layers))
-
-        self.out = nn.Sequential(
-            nn.GroupNorm(8, channels),
+        self.out_conv = nn.Sequential(
+            nn.GroupNorm(8, cascade_channels[0]),
             nn.SiLU(),
-            nn.Conv2d(channels, out_channels, kernel_size=1)
+            nn.Conv2d(cascade_channels[0], out_channels, kernel_size=3, padding=1)
         )
-
-    def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
-        """ Forward pass of the UNet
+    
+    def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """ Forward pass
 
         Args:
-            x (torch.Tensor): the input tensor, (batch_size, channels, height, width)
-            time_steps (torch.Tensor): the time steps with shape (batch_size)
-            cond (torch.Tensor): the conditional tensor with shape (batch_size, channels, d_cond)
-        
+            x (torch.Tensor): input sample, with shape (B, C, H, W)
+            time_steps (torch.Tensor): diffusion time steps, with shape (B, )
+            cond (torch.Tensor): conditioning tensor, with shape (B, C_cond)
+
         Returns:
-            torch.Tensor: the output tensor with shape (batch_size, channels, height, width)
-        """
-        x_input_block = []
-
-        t_emb = self.time_embedding_mlp(time_steps).unsqueeze(1)
-        if cond is not None:
-            c_emb = self.cond_embedding_mlp(cond).reshape(x.shape[0], cond.shape[-1], -1)
-            emb = torch.cat([t_emb, c_emb], dim=1).flatten(start_dim=1)
-        else:
-            emb = t_emb.flatten(start_dim=1)
-
-        for module in self.input_blocks:
-            x = module(x, emb)
-            x_input_block.append(x)
-        
-        x = self.middle_block(x, emb)
-
-        for module in self.output_blocks:
-            x = module(torch.cat([x, x_input_block.pop()], dim=1), emb)
-        
-        return self.out(x)
-
-
-class UNetXAttn(BasicUNet):
-    def __init__(self, 
-                 *,
-                 in_channels: int,
-                 out_channels: int,
-                 channels: int,
-                 channel_multpliers: List[int],
-                 n_res_blocks: int, 
-                 attention_levels: List[int],
-                 n_heads: int,
-                 transformer_layers: int=1,
-                 cond_channels: int=3):
-        """ UNet model with cross attention for approximating noise
-
-        Args:
-            in_channels (int): the input channel size
-            out_channels (int): the output channel size
-            channels (int): the initial channel size for the first convolution layer, also for the dimension of time embedding
-            channel_multpliers (List[int]): the channel multiplier for each level
-            n_res_blocks (int): the number of residual blocks in each level
-            attention_levels (List[int]): the levels where to apply attention at
-            n_heads (int): the number of heads for the attention
-            transformer_layers (int, optional): the number of transformer layers. Defaults to 1.
-            cond_channels (int, optional): the channel of condition, up to how many types of condition we have. Defaults to 3.
+            torch.Tensor: noise prediction, with shape (B, C, H, W)
         """ 
-        super().__init__()
-        self.channels = channels
-
-        n_levels = len(channel_multpliers)
-        channels_list = [channels * m for m in channel_multpliers]
-
-        d_time_emb = channels * 4
-        self.time_embedding_mlp = nn.Sequential(
-            TimeEmbeddingBlock(channels),
-            nn.Linear(channels, d_time_emb),
-            nn.SiLU(),
-            nn.Linear(d_time_emb, d_time_emb)
-        )
-
-        d_cond_emb = channels * 4 * cond_channels
-        self.cond_embedding_mlp = nn.Sequential(
-            ConditionEmbeddingBlock(channels),
-            nn.Flatten(),
-            nn.Linear(cond_channels * channels, d_cond_emb),
-            nn.SiLU(),
-            nn.Linear(d_cond_emb, d_cond_emb)
-        )
-
-        self.input_blocks = nn.ModuleList([])
-
-        self.input_blocks.append(TimeStepEmbedSequential(
-            nn.Conv2d(in_channels, channels, kernel_size=3, padding=1)))
-        
-        input_block_channels = [channels]
-
-        for i in range(n_levels):
-            for _ in range(n_res_blocks):
-                layers = [ResBlock(channels, d_time_emb, out_channels=channels_list[i])]
-                channels = channels_list[i]
-
-                if i in attention_levels:
-                    layers.append(SpatialTransformer(channels, cond_channels, n_heads, transformer_layers))
-
-                self.input_blocks.append(TimeStepEmbedSequential(*layers))
-                input_block_channels.append(channels)
-            
-            if i != n_levels - 1:
-                self.input_blocks.append(TimeStepEmbedSequential(DownSample(channels)))
-                input_block_channels.append(channels)
-        
-        self.middle_block = TimeStepEmbedSequential(
-            ResBlock(channels, d_time_emb),
-            SpatialTransformer(channels, cond_channels, n_heads, transformer_layers),
-            ResBlock(channels, d_time_emb)
-        )
-
-        self.output_blocks = nn.ModuleList([])
-
-        for i in reversed(range(n_levels)):
-
-            for j in range(n_res_blocks+1):
-                layers = [ResBlock(channels+input_block_channels.pop(), d_time_emb, out_channels=channels_list[i])]
-                channels = channels_list[i]
-
-                if i in attention_levels:
-                    layers.append(SpatialTransformer(channels, cond_channels, n_heads, transformer_layers))
-                
-                if i != 0 and j == n_res_blocks:
-                    layers.append(UpSample(channels))
-                
-                self.output_blocks.append(TimeStepEmbedSequential(*layers))
-
-        self.out = nn.Sequential(
-            nn.GroupNorm(8, channels),
-            nn.SiLU(),
-            nn.Conv2d(channels, out_channels, kernel_size=3, padding=1)
-        )
-
-    def forward(self, x: torch.Tensor, time_steps: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
-        """ forward pass
-
-        Args:
-            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
-            time_steps (torch.Tensor): time steps with shape (batch_size)
-            cond (Optional[torch.Tensor], optional): conditional feature map with shape (batch_size, channels, d_cond). Defaults to None.
-
-        Returns:
-            torch.Tensor: output feature map with shape (batch_size, channels, height, width)
-        """
         x_input_block = []
 
         t_emb = self.time_embedding_mlp(time_steps)
-        cond_emb = self.cond_embedding_mlp(cond).view(x.shape[0], cond.shape[-1], -1)
+        c_emb = self.condition_embedding_mlp(cond)
 
-        for module in self.input_blocks:
-            x = module(x, t_emb, cond_emb)
+        x = self.in_conv(x)
+
+        for module in self.down_blocks:
+            x = module(x, t_emb, c_emb)
             x_input_block.append(x)
         
-        x = self.middle_block(x, t_emb, cond_emb)
+        x = self.middle_block(x, t_emb, c_emb)
 
-        for module in self.output_blocks:
-            x = module(torch.cat([x, x_input_block.pop()], dim=1), t_emb, cond_emb)
+        for module in self.up_blocks:
+            x = module(torch.cat([x, x_input_block.pop()], dim=1), t_emb, c_emb)
         
-        return self.out(x)
-
+        return self.out_conv(x)
 
 ##############################################################################################################################################################
 def _test_unet():
-    unet = UNet(in_channels=1,
-                out_channels=1,
-                channels=64,
-                channel_multpliers=[1, 2, 4, 8],
-                n_res_blocks=2,
-                attention_levels=[0, 1, 2],
-                n_heads=8,
-                cond_channels=0)
+    unet = UNet(
+        in_channels=1,
+        out_channels=1,
+        cascade_channels=[32, 64, 128, 256],
+        condition_channels=3,
+        embedding_size=128,
+        down_blocks=["ResDownBlock", "XAttnDownBlock", "XAttnDownBlock"],
+        middle_block_type="AttnMidBlock",
+        up_blocks=["XAttnUpBlock", "XAttnUpBlock", "ResUpBlock"],
+    )
     # print(unet)
-    print(f"total params: {sum(p.numel() for p in unet.parameters())}")
-    input = torch.randn((2, 1, 64, 64))
+    input = torch.randn(2, 1, 64, 64)
     time_steps = torch.randn(2)
-    # cond = torch.randn((2, 3))
-    output = unet(input, time_steps, cond=None)
-    print(output.shape)
-
-def _test_xunet():
-    unet = UNetXAttn(in_channels=1,
-                     out_channels=1,
-                     channels=64,
-                     channel_multpliers=[1, 2, 4, 8],
-                     n_res_blocks=2,
-                     attention_levels=[0, 1, 2],
-                     n_heads=8,
-                     transformer_layers=1,
-                     cond_channels=3)
-    # print(unet)
-    print(f"total params: {sum(p.numel() for p in unet.parameters())}")
-    input = torch.randn((2, 1, 64, 64))
-    time_steps = torch.randn(2)
-    cond = torch.randn((2, 3))
+    cond = torch.randn(2, 3)
     output = unet(input, time_steps, cond)
     print(output.shape)
 
 if __name__ == "__main__":
     _test_unet()
-    # _test_xunet()

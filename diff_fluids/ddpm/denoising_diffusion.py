@@ -7,9 +7,9 @@ from tqdm import tqdm
 class DenoisingDiffusion(nn.Module):
     def __init__(self,
                  eps_model: nn.Module,
-                 n_steps: int,
-                 betas: tuple = (1e-4, 0.02),
-                 device: torch.device = 'cuda:0',
+                 *,
+                 betas: list,
+                 n_diffusion_steps: int,
                  ) -> None:
         super().__init__()
         """ DDPM model
@@ -20,15 +20,13 @@ class DenoisingDiffusion(nn.Module):
             betas (List[float]): bounds for betas in noise schedule
             n_steps (int): diffusion steps
         """
-        self.eps_model = eps_model.to(device)
+        self.eps_model = eps_model
         self.betas = betas
-        self.n_steps = n_steps
+        self.n_diffusion_steps = n_diffusion_steps
         self.mse_loss = nn.MSELoss()
 
         for k, v in self.ddpm_schedule.items():
             self.register_buffer(k, v)
-
-        self.device = device
     
     @property
     def ddpm_schedule(self) -> dict:
@@ -40,7 +38,7 @@ class DenoisingDiffusion(nn.Module):
         beta1, beta2 = self.betas
         assert beta1 < beta2 < 1.0 # beta1 and beta2 must be in (0, 1)
 
-        beta_t = (beta2 - beta1) * torch.arange(0, self.n_steps + 1, dtype=torch.float32) / self.n_steps + beta1
+        beta_t = (beta2 - beta1) * torch.arange(0, self.n_diffusion_steps + 1, dtype=torch.float32) / self.n_diffusion_steps + beta1
         sqrt_beta_t = torch.sqrt(beta_t)
         alpha_t = 1 - beta_t
         log_alpha_t = torch.log(alpha_t)
@@ -71,8 +69,8 @@ class DenoisingDiffusion(nn.Module):
         Returns:
             loss (torch.Tensor): DDPM loss for reconstruct the noise
         """        
-        _nts = torch.randint(1, self.n_steps, (x.shape[0],)).to(x.device)
-        _ts = (_nts / self.n_steps)
+        _nts = torch.randint(1, self.n_diffusion_steps, (x.shape[0],)).to(x.device)
+        _ts = (_nts / self.n_diffusion_steps)
         noise = torch.randn_like(x)  # eps ~ N(0, 1), 
         sqrtab = self.sqrtab[_nts, None, None, None]    # \sqrt{\bar{\alpha_t}}, extended to (B, 1, 1, 1)
         sqrtmab = self.sqrtmab[_nts, None, None, None]  # \sqrt{1-\bar{\alpha_t}}, extended to (B, 1, 1, 1)
@@ -96,11 +94,10 @@ class DenoisingDiffusion(nn.Module):
         Returns:
             x (torch.Tensor): (B, 1, H, W), sampled frame
         """        
-        x_t = x0.to(self.device)
-        cond = cond.to(self.device) if cond is not None else None
+        x_t = x0
 
-        for i in tqdm(range(self.n_steps, 0, -1)):
-            t_is = torch.tensor([i / self.n_steps]).repeat(x_t.shape[0]).to(self.device)
+        for i in tqdm(range(self.n_diffusion_steps, 0, -1)):
+            t_is = torch.tensor([i / self.n_diffusion_steps]).repeat(x_t.shape[0]).to(self.device)
 
             z = torch.randn_like(x_t) if i > 1 else 0
 

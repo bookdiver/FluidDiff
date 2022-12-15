@@ -173,16 +173,26 @@ class UniversialEmbedSequential(nn.Sequential):
         for module in self:
 
             if isinstance(module, ResBlock):
+                t_emb_channel = 1
+                c_emb_channel = c_emb.shape[1]
 
-                assert emb.shape[1] == module.emb_channels, \
-                f"input embedding channels {emb.shape[1]} does not match requirements of ResBlock [{module.emb_channels}]"
+                if module.emb_channels == t_emb_channel:
+                    emb = t_emb
+                elif module.emb_channels == c_emb_channel:
+                    emb = c_emb
+                elif module.emb_channels == t_emb_channel + c_emb_channel:
+                    emb = torch.cat([t_emb, c_emb], dim=1)
+                else:
+                    raise ValueError(f"embedding channels does not match requirements of ResBlock")
 
                 x = module(x, emb)
 
             elif isinstance(module, SpatialTransformer):
 
-                assert emb.shape[1] == module.text_feat_channels, \
-                f"input embedding channels {emb.shape[1]} does not match requirements of SpatialTransformer [{module.text_feat_channels}]"
+                if module.use_cross_attn:
+                    emb = c_emb
+                else:
+                    emb = None
 
                 x = module(x, emb)
         
@@ -249,13 +259,6 @@ class SinusoidalEmbeddingBlock(nn.Module):
         
         return embedding
         
-class BasicUNet(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        pass
-
 def get_embedding_block(*,
                         embedding_object: str, 
                         embedding_size: int, 
@@ -481,25 +484,66 @@ def _test_embedding():
     print(f"Condition embedding: {block_c(conditions).shape}")
 
 def _test_down_block():
-    print("Testing ResBlock with downsample")
+    print("Testing DownBlock with downsample")
     block = get_down_block(block_type='CrossAttnBlock',
                            in_channels=32,
                            out_channels=64,
                            res_embedding_size=128,
                            res_embedding_channels=1,
-                           xattn_channels=4,
+                           xattn_channels=3,
+                           is_last=True,
                            n_res_groups=8,
                            n_attn_groups=16,
                            n_res_layers=2)
     x = torch.randn((4, 32, 16, 16))
     t_emb = torch.randn((4, 1, 128))
-    tc_emb = torch.randn((4, 4, 128))
+    c_emb = torch.randn((4, 3, 128))
     print(f"Input feature map: {x.shape}")
     print(f"Diffusion step embedding: {t_emb.shape}")
-    print(f"Concatenated embedding: {tc_emb.shape}")
-    print(f"Output feature map: {block(x, t_emb, tc_emb).shape}")
+    print(f"Condition embedding: {c_emb.shape}")
+    print(f"Output feature map: {block(x, t_emb, c_emb).shape}")
+
+def _test_mid_block():
+    print("Testing MidBlock")
+    block = get_mid_block(block_type='AttnBlock',
+                          channels=32,
+                          res_embedding_size=128,
+                          res_embedding_channels=1,
+                          xattn_channels=None,
+                          n_res_groups=8,
+                          n_attn_groups=16,
+                          n_res_layers=2)
+    x = torch.randn((4, 32, 16, 16))
+    t_emb = torch.randn((4, 1, 128))
+    c_emb = torch.randn((4, 3, 128))
+    print(f"Input feature map: {x.shape}")
+    print(f"Diffusion step embedding: {t_emb.shape}")
+    print(f"Condition embedding: {c_emb.shape}")
+    print(f"Output feature map: {block(x, t_emb, c_emb).shape}")
+
+def _test_up_block():
+    print("Testing UpBlock")
+    block = get_up_block(block_type='ResBlock',
+                         in_channels=32,
+                         out_channels=16,
+                         res_embedding_size=128,
+                         res_embedding_channels=1,
+                         xattn_channels=3,
+                         is_last=False,
+                         n_res_groups=8,
+                         n_attn_groups=16,
+                         n_res_layers=2)
+    x = torch.randn((4, 32, 16, 16))
+    t_emb = torch.randn((4, 1, 128))
+    c_emb = torch.randn((4, 3, 128))
+    print(f"Input feature map: {x.shape}")
+    print(f"Diffusion step embedding: {t_emb.shape}")
+    print(f"Condition embedding: {c_emb.shape}")
+    print(f"Output feature map: {block(x, t_emb, c_emb).shape}")
 
 
 if __name__ == '__main__':
     # _test_embedding()
-    _test_down_block() 
+    # _test_down_block() 
+    # _test_mid_block()
+    _test_up_block()
