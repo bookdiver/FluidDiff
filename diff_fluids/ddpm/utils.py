@@ -28,6 +28,7 @@ class FluidDataSet(Dataset):
             transforms.Normalize(mean=[0.5], std=[0.5]) if normalized else transforms.Lambda(lambda x: x)
         ])
         self.density = self.transform(self.density)
+        # TODO: the time channel needs to be normalized
 
     def __getitem__(self, index: int) -> tuple:
         frame_rho = self.density[index]

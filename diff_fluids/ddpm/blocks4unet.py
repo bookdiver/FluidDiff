@@ -1,5 +1,4 @@
 import math
-from typing import Optional
 from functools import partial
 
 import torch
@@ -7,19 +6,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from einops import rearrange, reduce
+from einops.layers.torch import Rearrange
 
 from transformer4unet import SpatialTransformer
 
 def exists(val):
     return val is not None
-
-class Residual(nn.Module):
-    def __init__(self, fn: callable):
-        super().__init__()
-        self.fn = fn
-    
-    def forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        return x + self.fn(x, *args, **kwargs)
 
 class WeightStandardizedConv2d(nn.Conv2d):
     """ Weight Standardized Conv2d
@@ -37,12 +29,12 @@ class Block(nn.Module):
     def __init__(self,
                  in_channels: int,
                  out_channels: int,
-                 groups: int):
+                 n_groups: int):
         """ Block for Resnet block, contains 1 weighted convolution layer and 1 normalization layer, followed by a SiLU activation
         """
         super().__init__()
         self.conv = WeightStandardizedConv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.norm = nn.GroupNorm(groups, out_channels)
+        self.norm = nn.GroupNorm(n_groups, out_channels)
         self.act = nn.SiLU()
     
     def forward(self, x: torch.Tensor, scale_shift: tuple=None) -> torch.Tensor:
@@ -58,29 +50,36 @@ class Block(nn.Module):
 class ResBlock(nn.Module):
     def __init__(self, 
                  in_channels: int, 
-                 d_emb: int,
-                 groups: int=8,
+                 emb_channels: int,
+                 emb_size: int,
+                 n_groups: int=8,
                  *,
-                 out_channels:Optional[int]=None):
+                 out_channels: int=None):
         """ Residual block for the UNet
 
         Args:
-            in_channels (int): the input channel size
-            d_emb (int): the size of the embedding, can be either d_t_emb or d_cond_emb
-            groups (int, optional): the number of groups for the normalization layer. Defaults to 8.
+            in_channels (int): the input channel
+            emb_channels (int): the number of channels for the embedding, the embedding is expected to have the shape (B, emb_channels, emb_size)
+            emb_size (int): the size of the embedding
+            n_groups (int, optional): the number of groups for the normalization layer. Defaults to 8.
             out_channels (Optional[int], optional): the output channel size. Defaults to be same as in_channels.
         """
         super().__init__()
+
+        self.emb_channels = emb_channels
+        self.emb_size = emb_size
+
         if out_channels is None:
             out_channels = in_channels
 
         self.emb_mlp = nn.Sequential(
+            nn.Flatten(),
             nn.SiLU(),
-            nn.Linear(d_emb, 2 * out_channels)
+            nn.Linear(emb_channels * emb_size, 2 * out_channels)
         )
 
-        self.block1 = Block(in_channels, out_channels, groups)
-        self.block2 = Block(out_channels, out_channels, groups)
+        self.block1 = Block(in_channels, out_channels, n_groups)
+        self.block2 = Block(out_channels, out_channels, n_groups)
         
         # inner residual connection
         if in_channels == out_channels:
@@ -92,11 +91,13 @@ class ResBlock(nn.Module):
         """ foward pass
 
         Args:
-            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
-            emb (torch.Tensor): embedding with shape (batch_size, d_emb)
+            x (torch.Tensor): input feature map with shape (B, C, H, W)
+            emb (torch.Tensor): embedding with shape (B, emb_channels, emb_size)
+            NOTE: emb can be either diffusion step embedding (B, 1, emb_size) or conditional embedding (B, n_conditions, emb_size)
+            or both (B, n_conditions + 1, emb_size)
 
         Returns:
-            torch.Tensor: output feature map with shape (batch_size, channels, height, width)
+            torch.Tensor: output feature map with shape (B, C, H, W)
         """
         scale_shift = None
         if exists(self.emb_mlp) and exists(emb):
@@ -105,14 +106,14 @@ class ResBlock(nn.Module):
             scale_shift = emb.chunk(2, dim=1)
         
         h = self.block1(x, scale_shift=scale_shift)
-        h = self.block2(h)
+        h = self.block2(h, scale_shift=None)
         
         return h + self.res_connnection(x)
         
 class DownSample(nn.Module):
     def __init__(self, 
                  in_channels: int, 
-                 out_channels: Optional[int]=None
+                 out_channels: int=None
                  ):
         """ Downsample the feature map
         """
@@ -125,17 +126,17 @@ class DownSample(nn.Module):
         """ forward pass
 
         Args:
-            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
+            x (torch.Tensor): input feature map with shape (B, C, H, W)
 
         Returns:
-            torch.Tensor: output feature map with shape (batch_size, channels, height/2, width/2)
+            torch.Tensor: output feature map with shape (B, C, H/2, W/2)
         """
         return self.conv(x)
 
 class UpSample(nn.Module):
     def __init__(self, 
                  in_channels: int, 
-                 out_channels: Optional[int]=None
+                 out_channels: int=None
                  ):
         """ Upsample the feature map
         """
@@ -148,144 +149,357 @@ class UpSample(nn.Module):
         """ forward pass
 
         Args:
-            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
+            x (torch.Tensor): input feature map with shape (B, C, H, W)
 
         Returns:
-            torch.Tensor: output feature map with shape (batch_size, channels, height*2, width*2)
+            torch.Tensor: output feature map with shape (B, C, H*2, W*2)
         """
         return self.conv(x)
 
-class TimeStepEmbedSequential(nn.Sequential):
-    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, cond_emb: Optional[torch.Tensor]=None) -> torch.Tensor:
-        """ forward pass
-
-        Args:
-            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
-            t_emb (torch.Tensor): diffusion time embedding with shape (batch_size, d_t_emb)
-            cond_emb (Optional[torch.Tensor], optional): conditional feature map with shape (batch_size, channels, d_cond). Defaults to None.
-
-        Returns:
-            torch.Tensor: output feature map with shape (batch_size, channels, height, width)
-        """
-        for module in self:
-            if isinstance(module, ResBlock):
-                x = module(x, t_emb)
-            elif isinstance(module, SpatialTransformer):
-                x = module(x, cond_emb)
-            else:
-                x = module(x)
-        return x
-
 class UniversialEmbedSequential(nn.Sequential):
-    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
-        """ forward pass, takes a universal embedding emb, containing both time and conditional embedding
+    def forward(self, x: torch.Tensor, t_emb: torch.Tensor, c_emb: torch.Tensor) -> torch.Tensor:
+        """ forward pass, using either Residual connection or Spatial Transformer
+        to combine the feature map with the embeddings.
 
         Args:
-            x (torch.Tensor): input feature map with shape (batch_size, channels, height, width)
-            emb (torch.Tensor): embedding with shape (batch_size, d_emb)
-
+            x (torch.Tensor): input feature map with shape (B, C, H, W)
+            emb (torch.Tensor): can be either single diffusion time step embedding (B, 1, emb_size),
+            or conditional embedding (B, n_conditions, emb_size),
+            or universal embedding (B, n_conditions+1, emb_size) consisting of both diffusion time step and condition of generation.
+    
         Returns:
-            torch.Tensor: output feature map with shape (batch_size, channels, height, width)
+            torch.Tensor: output feature map
         """
         for module in self:
+
             if isinstance(module, ResBlock):
+
+                assert emb.shape[1] == module.emb_channels, \
+                f"input embedding channels {emb.shape[1]} does not match requirements of ResBlock [{module.emb_channels}]"
+
                 x = module(x, emb)
+
+            elif isinstance(module, SpatialTransformer):
+
+                assert emb.shape[1] == module.text_feat_channels, \
+                f"input embedding channels {emb.shape[1]} does not match requirements of SpatialTransformer [{module.text_feat_channels}]"
+
+                x = module(x, emb)
+        
             else:
                 x = module(x)
         return x
 
-class TimeEmbeddingBlock(nn.Module):
-    def __init__(self, d_emb: int, max_period: int=10000):
-        super().__init__()
-        self.d_emb = d_emb
-        self.max_period = max_period
-    
-    def forward(self, time_steps: torch.Tensor) -> torch.Tensor:
-        """ Using GaussianFourierFeatures to generate time step embedding
+class SinusoidalEmbeddingBlock(nn.Module):
+    def __init__(self, embedding_size: int, max_period: int=10000):
+        """ Block for embedding condition using Sinusoidal Fourier Features. The condition can
+        be either diffusion time steps or condition of the genertion, which depends on the forward
+        input.
 
         Args:
-            time_steps (torch.Tensor): time steps with shape (batch_size)
-            max_period (int, optional): minimum frequency of the embedding. Defaults to 10000.
-
-        Returns:
-            torch.Tensor: time step embedding with shape (batch_size, d_emb)
+            embedding_dim (int): embedding dimension, decide the length of the vector after embedding
+            max_period (int, optional): maximal changing period, determine the minimal frequency of the
+            encode, the more the max_period, the more the embedding can capture the details .Defaults to 10000.
         """
-        half = self.d_emb // 2
-        freqs = torch.exp(
-            math.log(self.max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-        ).to(device=time_steps.device)
-
-        args = time_steps[:, None].float() * freqs[None]
-        te = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-        return te
-
-class ConditionEmbeddingBlock(nn.Module):
-    def __init__(self, d_emb: int, max_period: int=10000):
         super().__init__()
-        self.d_emb = d_emb
+        self.embedding_size = embedding_size
         self.max_period = max_period
     
-    def forward(self, condition: torch.Tensor) -> torch.Tensor:
-        """ Using GaussianFourierFeatures to generate position embedding
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """ Embed the input
 
         Args:
-            condition (torch.Tensor): condtion with shape (batch_size, 3)
-            max_period (int, optional): minimum frequency of the embedding, can be smaller since we don't need so precise as time right now. Defaults to 1000.
+            x (torch.Tensor): input with shape: 
+            (B, n_conditions): condition of generation
+            or 
+            (B, ): diffusion time steps
 
         Returns:
-            torch.Tensor: position embedding with shape (batch_size, 3, d_emb)
+            torch.Tensor: embedding with shape (batch_size, embedding_dim)
         """
-        half = self.d_emb // 2
-        freqs = torch.exp(
-            math.log(self.max_period) * torch.arange(start=0, end=half, dtype=torch.float32) / half
-        ).to(device=condition.device)
 
-        real_t, pos_x, pos_y = condition.chunk(3, dim=1)
-        # do the normalization on real time steps
-        real_t = real_t / 50.0
+        half_size = self.embedding_size // 2
+        freqs = torch.exp(
+            math.log(self.max_period) * torch.arange(start=0, end=half_size, dtype=torch.float32) / half_size
+        ).to(device=x.device)
+
+        # embed the diffusion time steps
+        if x.ndim == 1:
+            args = x[:, None].float() * freqs[None]
+            embedding = torch.cat([torch.sin(args), torch.cos(args)], dim=-1).unsqueeze(1)
+
+        # embed the condition of generation
+        elif x.ndim == 2:
+
+            assert x.shape[1] == 3, "Now only support 3D condition of generation, which is (t, x, y)"
+            real_t, pos_x, pos_y = x.chunk(3, dim=1)
+            
+            args = real_t[:, None].float() * freqs[None]
+            pe_t = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+
+            args = pos_x[:, None].float() * freqs[None]
+            pe_x = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+
+            args = pos_y[:, None].float() * freqs[None]
+            pe_y = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
+
+            embedding = torch.cat([pe_t, pe_x, pe_y], dim=1)
+        else:
+            raise ValueError('Input dimension should be 1 or 2, but got {}'.format(x.ndim))
         
-        args = real_t[:, None].float() * freqs[None]
-        pe_t = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-
-        args = pos_x[:, None].float() * freqs[None]
-        pe_x = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
-
-        args = pos_y[:, None].float() * freqs[None]
-        pe_y = torch.cat([torch.cos(args), torch.sin(args)], dim=-1)
-
-        pe = torch.cat([pe_t, pe_x, pe_y], dim=1)
-        return pe
-
+        return embedding
+        
 class BasicUNet(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         pass
+
+def get_embedding_block(*,
+                        embedding_object: str, 
+                        embedding_size: int, 
+                        embedding_channels: int=None,
+                        out_size: int,
+                        ) -> nn.Module:
+    if embedding_object == 'DiffusionStep':
+        
+        embedding_channels = 1
+
+    elif embedding_object == 'Condition':
+
+        assert embedding_channels is not None and embedding_channels > 1, \
+        "Channel multipler should be same as the number of channels of condition"
     
-def _test_time_step_embedding():
-    import matplotlib.pyplot as plt
-    block = TimeEmbeddingBlock(d_emb=128, max_period=10000)
-    time_steps1 = torch.arange(0, 1000)
-    time_steps2 = torch.arange(0, 1000) / 1000.0
-    t_emb1 = block(time_steps1)
-    t_emb2 = block(time_steps2)
-    plt.figure()
-    plt.subplot(1, 2, 1)
-    plt.imshow(t_emb1.detach().numpy(), cmap='jet', aspect='auto', origin='lower')
-    plt.xlabel('Dimension')
-    plt.ylabel('Diffusion Time')
-    plt.title('Fouriour Features for Diffusion Time (Unnormalized)')
-    plt.colorbar()
+    else:
+        raise ValueError('Embedding object should be either DiffusionStep or Condition, but got {}'.format(embedding_object))
 
-    plt.subplot(1, 2, 2)
-    plt.imshow(t_emb2.detach().numpy(), cmap='jet', aspect='auto', origin='lower')
-    plt.xlabel('Dimension')
-    plt.ylabel('Diffusion Time')
-    plt.title('Fouriour Features for Diffusion Time (Normalized)')
-    plt.colorbar()
+    embedding_block = nn.Sequential(
+        SinusoidalEmbeddingBlock(embedding_size=embedding_size),
+        nn.Flatten(),
+        nn.Linear(embedding_channels * embedding_size, embedding_channels * out_size),
+        nn.SiLU(),
+        nn.Linear(embedding_channels * out_size, embedding_channels * out_size),
+        Rearrange('b (c d) -> b c d', c=embedding_channels, d=out_size)
+    )
 
-    plt.show()
+    return embedding_block
+
+def get_down_block(block_type: str,
+                   in_channels: int,
+                   out_channels: int,
+                   res_embedding_size: int,
+                   res_embedding_channels: int,
+                   *,
+                   xattn_channels: int=None,
+                   is_last: bool=False,
+                   n_res_groups: int=8,
+                   n_attn_groups: int=8,
+                   n_attn_heads: int=8,
+                   n_res_layers: int=2,
+                   n_transformer_layers: int=1) -> nn.Module:
+    blocks = []
+    if block_type == 'ResBlock':
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=in_channels, 
+                                   emb_size=res_embedding_size, 
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=out_channels))
+            in_channels = out_channels
+        if not is_last:
+            blocks.append(DownSample(in_channels=out_channels,
+                                     out_channels=out_channels))
+
+    elif block_type == 'AttnBlock':
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=in_channels, 
+                                   emb_size=res_embedding_size,
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=out_channels))
+            in_channels = out_channels
+            blocks.append(
+                SpatialTransformer(vis_feat_channels=out_channels,
+                                   text_feat_channels=xattn_channels,
+                                   num_heads=n_attn_heads,
+                                   num_groups=n_attn_groups,
+                                   num_transformers=n_transformer_layers, 
+                                   use_cross_attn=False)
+            )
+        if not is_last:
+            blocks.append(DownSample(in_channels=out_channels,
+                                     out_channels=out_channels))
+
+    elif block_type == 'CrossAttnBlock':
+
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=in_channels, 
+                                   emb_size=res_embedding_size, 
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=out_channels))
+            in_channels = out_channels
+            blocks.append(SpatialTransformer(vis_feat_channels=out_channels,
+                                            text_feat_channels=xattn_channels,
+                                            num_heads=n_attn_heads,
+                                            num_groups=n_attn_groups,
+                                            num_transformers=n_transformer_layers, 
+                                            use_cross_attn=True)
+            )
+        if not is_last:
+            blocks.append(DownSample(in_channels=out_channels,
+                                     out_channels=out_channels))
+
+    return UniversialEmbedSequential(*blocks)
+
+def get_mid_block(block_type: str,
+                  channels: int,
+                  res_embedding_size: int,
+                  res_embedding_channels: int,
+                  *,
+                  xattn_channels: int=None,
+                  n_res_groups: int=8,
+                  n_attn_groups: int=8,
+                  n_attn_heads: int=8,
+                  n_res_layers: int=2,
+                  n_transformer_layers: int=1) -> nn.Module:
+    assert n_res_layers % 2 == 0, 'n_res_layers should be even'
+    blocks = []
+    if block_type == 'ResBlock':
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=channels, 
+                                   emb_size=res_embedding_size, 
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=channels))
+    elif block_type == 'AttnBlock':
+        blocks.append(SpatialTransformer(vis_feat_channels=channels,
+                                        text_feat_channels=xattn_channels,
+                                        num_heads=n_attn_heads,
+                                        num_groups=n_attn_groups,
+                                        num_transformers=n_transformer_layers, 
+                                        use_cross_attn=False)
+        )
+
+        for _ in range(n_res_layers // 2):
+            blocks.insert(0, ResBlock(in_channels=channels, 
+                                      emb_size=res_embedding_size, 
+                                      emb_channels=res_embedding_channels,
+                                      n_groups=n_res_groups, 
+                                      out_channels=channels))
+            blocks.append(ResBlock(in_channels=channels, 
+                                   emb_size=res_embedding_size, 
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=channels))
+    else:
+        raise NotImplementedError('block_type should be either ResBlock or AttnBlock, but got {}'.format(block_type))
+    return UniversialEmbedSequential(*blocks)
+
+def get_up_block(block_type: str,
+                in_channels: int,
+                out_channels: int,
+                res_embedding_size: int,
+                res_embedding_channels: int,
+                *,
+                xattn_channels: int=None,
+                is_last: bool=False,
+                n_res_groups: int=8,
+                n_attn_groups: int=8,
+                n_attn_heads: int=8,
+                n_res_layers: int=2,
+                n_transformer_layers: int=1) -> nn.Module:
+    blocks = []
+    if block_type == 'ResBlock':
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=in_channels, 
+                                   emb_size=res_embedding_size, 
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=out_channels))
+            in_channels = out_channels
+        if not is_last:
+            blocks.append(UpSample(in_channels=out_channels,
+                                     out_channels=out_channels))
+
+    elif block_type == 'AttnBlock':
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=in_channels, 
+                                   emb_size=res_embedding_size,
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=out_channels))
+            in_channels = out_channels
+            blocks.append(
+                SpatialTransformer(vis_feat_channels=out_channels,
+                                   text_feat_channels=xattn_channels,
+                                   num_heads=n_attn_heads,
+                                   num_groups=n_attn_groups,
+                                   num_transformers=n_transformer_layers, 
+                                   use_cross_attn=False)
+            )
+        if not is_last:
+            blocks.append(UpSample(in_channels=out_channels,
+                                     out_channels=out_channels))
+
+    elif block_type == 'CrossAttnBlock':
+
+        for _ in range(n_res_layers):
+            blocks.append(ResBlock(in_channels=in_channels, 
+                                   emb_size=res_embedding_size, 
+                                   emb_channels=res_embedding_channels,
+                                   n_groups=n_res_groups, 
+                                   out_channels=out_channels))
+            in_channels = out_channels
+            blocks.append(SpatialTransformer(vis_feat_channels=out_channels,
+                                            text_feat_channels=xattn_channels,
+                                            num_heads=n_attn_heads,
+                                            num_groups=n_attn_groups,
+                                            num_transformers=n_transformer_layers, 
+                                            use_cross_attn=True)
+            )
+        if not is_last:
+            blocks.append(UpSample(in_channels=out_channels,
+                                     out_channels=out_channels))
+
+    return UniversialEmbedSequential(*blocks)
+                  
+def _test_embedding():
+    block_t = get_embedding_block(embedding_object='DiffusionStep',
+                                  embedding_size=32,
+                                  out_size=128)
+    block_c = get_embedding_block(embedding_object='Condition',
+                                  embedding_size=32,
+                                  embedding_channels=3,
+                                  out_size=128)
+    time_steps = torch.randn((4, ))
+    conditions = torch.randn((4, 3))
+    print(f"Time steps: {time_steps.shape}")
+    print(f"Conditions: {conditions.shape}")
+    print(f"Time embedding: {block_t(time_steps).shape}")
+    print(f"Condition embedding: {block_c(conditions).shape}")
+
+def _test_down_block():
+    print("Testing ResBlock with downsample")
+    block = get_down_block(block_type='CrossAttnBlock',
+                           in_channels=32,
+                           out_channels=64,
+                           res_embedding_size=128,
+                           res_embedding_channels=1,
+                           xattn_channels=4,
+                           n_res_groups=8,
+                           n_attn_groups=16,
+                           n_res_layers=2)
+    x = torch.randn((4, 32, 16, 16))
+    t_emb = torch.randn((4, 1, 128))
+    tc_emb = torch.randn((4, 4, 128))
+    print(f"Input feature map: {x.shape}")
+    print(f"Diffusion step embedding: {t_emb.shape}")
+    print(f"Concatenated embedding: {tc_emb.shape}")
+    print(f"Output feature map: {block(x, t_emb, tc_emb).shape}")
+
 
 if __name__ == '__main__':
-    _test_time_step_embedding()
+    # _test_embedding()
+    _test_down_block() 

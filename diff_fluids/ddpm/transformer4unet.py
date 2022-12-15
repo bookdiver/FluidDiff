@@ -1,10 +1,7 @@
-from typing import Union
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
-from einops.layers.torch import Rearrange
 
 class GeGLU(nn.Module):
     """ GeGLU activation
@@ -20,32 +17,8 @@ class GeGLU(nn.Module):
         output = x * F.gelu(gate)
         return output
 
-class LayerNorm(nn.Module):
-    """ An unlearnable layer norm
-    """
-    def __init__(self, dim):
-        super().__init__()
-        self.g = nn.Parameter(torch.ones(1, dim, 1, 1))
-
-    def forward(self, x):
-        eps = 1e-5 if x.dtype == torch.float32 else 1e-3
-        var = torch.var(x, dim = 1, unbiased = False, keepdim = True)
-        mean = torch.mean(x, dim = 1, keepdim = True)
-        return (x - mean) * (var + eps).rsqrt() * self.g
-
-class PreNorm(nn.Module):
-    """ Pre-normalization
-    """
-    def __init__(self, dim, fn):
-        super().__init__()
-        self.norm = LayerNorm(dim)
-        self.fn = fn
-
-    def forward(self, x, *args, **kwargs):
-        return self.fn(self.norm(x), *args, **kwargs)
-
 class FeedForward(nn.Module):
-    def __init__(self, feat_channels, d_mult=4, dropout=0.1):
+    def __init__(self, feat_channels, d_mult=4, dropout=0.2):
         super().__init__()
         self.net = nn.Sequential(
             GeGLU(feat_channels, feat_channels * d_mult),
@@ -57,119 +30,74 @@ class FeedForward(nn.Module):
         return self.net(x)
 
 class AttnBlock(nn.Module):
-    def __init__(self, feat_channels: int, n_heads: int, d_head: int):
-        """ Simple self-attention
+    def __init__(self, 
+                 vis_feat_channels: int, 
+                 num_heads: int=8, 
+                 *,
+                 text_feat_channels: int, 
+                 is_inplace: bool = True,
+                 use_cross_attn: bool = False):
+        """ Spatial Transformer Block, can do either self-attention or cross-attention
 
         Args:
-            feat_channels (int): the channel of the input tensor
-            n_heads (int): the number of heads
-            d_head (int): the size of each head
-
-        """      
-        super().__init__()
-        self.n_heads = n_heads
-        self.scale = d_head ** -0.5
-        d_attn = n_heads * d_head
-        self.to_qkv = nn.Conv2d(feat_channels, d_attn * 3, kernel_size=1, bias=False)
-        self.to_out = nn.Conv2d(d_attn, feat_channels, kernel_size=1)
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """ do the self-attention without condition
-
-        Args:
-            x (torch.Tensor): input feature map, with size of (batch_size, n_channels, height, width)
-
-        Returns:
-            torch.Tensor: the output feature map, with size of (batch_size, n_channels, width, height)
-        """
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h=self.n_heads), qkv)
-        q = q * self.scale
-
-        similarity = torch.einsum('b h d i, b h d j -> b h i j', q, k)
-        attn = similarity.softmax(dim=-1)
-        out = torch.einsum('b h i j, b h d j -> b h i d', attn, v)
-
-        out = rearrange(out, 'b h (x y) d -> b (h d) x y', x=h, y=w)
-        out = self.to_out(out)
-        return out
-
-class LinearAttnBlock(nn.Module):
-    def __init__(self, feat_channels: int, n_heads: int, d_head: int):
-        """ A linear attention block
-        """
-        super().__init__()
-        self.feat_channels = feat_channels
-        self.n_heads = n_heads
-        self.scale = d_head ** -0.5
-        d_attn = n_heads * d_head
-        self.to_qkv = nn.Conv2d(feat_channels, d_attn * 3, kernel_size=1, bias=False)
-        self.to_out = nn.Sequential(
-            nn.Conv2d(d_attn, feat_channels, kernel_size=1),
-            LayerNorm(feat_channels)
-        )
-    
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """ do the linear self-attention without condition
-
-        Args:
-            x (torch.Tensor): input feature map, with size of (batch_size, n_channels, height, width)
-
-        Returns:
-            torch.Tensor: the output feature map, with size of (batch_size, n_channels, width, height)
-        """
-        b, c, h, w = x.shape
-        qkv = self.to_qkv(x).chunk(3, dim=1)
-        q, k, v = map(lambda t: rearrange(t, 'b (h c) x y -> b h c (x y)', h=self.n_heads), qkv)
-        
-        q = q.softmax(dim=-2)
-        k = k.softmax(dim=-1)
-
-        q = q * self.scale
-        v = v / (h * w)
-
-        context = torch.einsum('b h d n, b h e n -> b h d e', k, v)
-        out = torch.einsum('b h d e, b h d n -> b h e n', context, q)
-        out = rearrange(out, 'b h c (x y)  -> b (h c) x y', h=self.n_heads, x=h, y=w)
-        out = self.to_out(out)
-        return out
-
-
-class CrossAttnBlock(nn.Module):
-    def __init__(self, feat_channels: int, cond_channels: int, n_heads: int, d_head: int, is_inplace: bool=True):
-        """ Cross Attention Block
-
-        Args:
-            feat_channels (int): the channel of the input tensor
-            cond_channels (int): the channel of the condition tensor
-            n_heads (int): the number of heads
-            d_head (int): the size of each head
-            is_inplace (bool, optional): Whether to perform the attention softmax inplace to save memory. Defaults to True.
+            vis_feat_channels (int): the channel of the input visual feature maps, with shape (B, vis_feat_channels, H, W)
+            text_feat_channels (int): the channel of the textual conditional embeddings, with shape (B, text_feat_channels, emb_size)
+            num_heads (int): the number of heads in the multi-head attention. Defaults to 8.
+            is_inplace (bool, optional): whether to do the inplace operation. Defaults to True.
+            use_cross_attn (bool, optional): whether to use cross-attention. Defaults to False.
         """        
         super().__init__()
-        self.feat_channels = feat_channels
-        self.cond_channels = cond_channels
-        self.n_heads = n_heads
+        self.vis_feat_channels = vis_feat_channels
+
+        self.num_heads = num_heads
+        self.dim_head = vis_feat_channels // num_heads
         self.is_inplace = is_inplace
+        self.use_cross_attn = use_cross_attn
 
-        self.scale = d_head ** -0.5
+        self.scale = self.dim_head ** -0.5
 
-        d_attn = n_heads * d_head
-        self.q = nn.Linear(feat_channels, d_attn, bias=False)
-        self.k_cond = nn.Linear(cond_channels, d_attn, bias=False)
-        self.k_x = nn.Linear(feat_channels, d_attn, bias=False)
-        self.v_cond = nn.Linear(cond_channels, d_attn, bias=False)
-        self.v_x = nn.Linear(feat_channels, d_attn, bias=False)
+        self.dim_attn = num_heads * self.dim_head
 
-        self.to_out = nn.Linear(d_attn, feat_channels)
+        self.vis_to_qkv = nn.Linear(vis_feat_channels, self.dim_attn * 3)
 
-    def normal_attention(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-        q = q.reshape(*q.shape[:2], self.n_heads, -1)
-        k = k.reshape(*k.shape[:2], self.n_heads, -1)
-        v = v.reshape(*v.shape[:2], self.n_heads, -1)
+        if use_cross_attn:
+            assert text_feat_channels is not None, \
+                "text_feat_channels must be provided when use_cross_attn is True"
+            self.text_to_qkv = nn.Linear(text_feat_channels, self.dim_attn * 3)
+        else:
+            self.text_to_qkv = None
 
-        attn = torch.einsum('bihd, bjhd -> bhij', q, k) * self.scale
+        self.to_out = nn.Linear(self.dim_attn, vis_feat_channels)
+    
+    def forward(self, vis_feat: torch.Tensor, text_feat: torch.Tensor) -> torch.Tensor:
+        """ get q, k, v from vis_feat when text_feat is None (i.e. self-attention), or q from vis_feat and k, v from text_feat (i.e. cross-attention)
+
+        Args:
+            vis_feat (torch.Tensor): the visual feature maps, with shape (B, (H*W), vis_feat_channels)
+            text_feat (torch.Tensor): the textual conditional embeddings, with shape (B, emb_size, text_feat_channels)
+        
+        Returns:
+            torch.Tensor: the output feature maps, with shape (B, (H*W), vis_feat_channels) to fit the feed-forward network
+        """
+        qkv_vis = self.vis_to_qkv(vis_feat)
+        q, k, v = qkv_vis.chunk(3, dim=-1)
+        # q_vis, k_vis, v_vis shape [B, (H*W), (num_heads * dim_head)]
+        q = rearrange(q, 'b e (h d) -> b e h d', h=self.num_heads, d=self.dim_head)
+        # q_vis shape [B, (H*W), num_heads, dim_head]
+        # do cross-attention
+        if self.use_cross_attn:
+            qkv_text = self.text_to_qkv(text_feat)
+            _, k, v = qkv_text.chunk(3, dim=-1)
+            # k_text, v_text shape [B, emb_size, (num_heads * dim_head)]
+        k, v = map(lambda t: rearrange(t, 'b e (h d) -> b e h d', h=self.num_heads, d=self.dim_head), (k, v))
+        # k_text, v_text shape [B, emb_size, num_heads, dim_head]
+        # k_vis, v_vis shape [B, (H*W), num_heads, dim_head]
+
+        # q, k, v with similar shape [B, (H*W) or emb_size, num_heads, dim_head]
+
+        q = q * self.scale
+        attn = torch.einsum('b i h d, b j h d -> b h i j', q, k)
+        # output shape [B, num_heads, (H*W), (H*W) or emb_size]
 
         if self.is_inplace:
             half = attn.shape[0] // 2
@@ -177,155 +105,177 @@ class CrossAttnBlock(nn.Module):
             attn[:half] = attn[:half].softmax(dim=-1)
         else:
             attn = attn.softmax(dim=-1)
-        
-        out = torch.einsum('bhij, bjhd -> bihd', attn, v)
-        return self.to_out(out.reshape(*out.shape[:2], -1))
-    
-    def forward(self, x: torch.Tensor, cond: Union[torch.Tensor, None]) -> torch.Tensor:
-        """ do the cross attention between x and cond, when cond is None, do the self attention
 
-        Args:
-            x (torch.Tensor): input tensor, with size of (batch_size, width*height, n_channels)
-            cond (Union[torch.Tensor, None]): the conditioning tensor, with size of (batch_size, condition_dim, n_channels)
+        out = torch.einsum('b h i j, b j h d -> b i h d', attn, v)
+        # output shape [B,(H*W), num_heads, dim_head]
 
-        Returns:
-            torch.Tensor: the output tensor, with size of (batch_size, width*height, n_channels)
-        """
-        q = self.q(x)
-        if cond is None:
-            # if there's no condition, it becomes the self-attention
-            k = self.k_x(x)
-            v = self.v_x(x)
-        else:
-            k = self.k_cond(cond)
-            v = self.v_cond(cond)
-        return self.normal_attention(q, k, v)
+        out = rearrange(out, 'b e h d -> b e (h d)', h=self.num_heads, d=self.dim_head)
+        # output shape [B, (H*W), dim_attn]
+        out = self.to_out(out)
+        # output shape [B, (H*W), vis_feat_channels]
+        return out
 
 class BasicTransformerBlock(nn.Module):
-    def __init__(self, feat_channels: int, cond_channels: int, n_heads: int, d_head: int):
-        """ Basic transformer block
+    def __init__(self, 
+                 vis_feat_channels: int, 
+                 text_feat_channels: int, 
+                 num_heads: int, 
+                 *,
+                 is_inplace: bool=True,
+                 use_cross_attn: bool=False):
+        """ Basic transformer block with 2 attention blocks and layer normalization, then using a feed-forward network
+        to concatenate all the heads.
 
         Args:
-            feat_channels (int): the input embedding size, i.e. the channel of the input tensor
-            cond_channels (int): the size of the conditioning vector, i.e. the channel of the conditioning tensor
-            n_heads (int): number of heads
-            d_heads (int): the size of each head
+            vis_feat_channels (int): the channel of the input visual feature maps
+            text_feat_channels (int): the channel of the textual conditional embeddings
+            num_heads (int): number of heads
+            is_inplace (bool, optional): whether to use inplace operation to save memory. Defaults to True.
         """
         super().__init__()
-        self.attn1 = CrossAttnBlock(feat_channels, feat_channels, n_heads, d_head)
-        self.norm1 = nn.LayerNorm(feat_channels)
+        self.use_cross_attn = use_cross_attn
 
-        self.attn2 = CrossAttnBlock(feat_channels, cond_channels, n_heads, d_head)
-        self.norm2 = nn.LayerNorm(feat_channels)
+        self.attn1 = AttnBlock(vis_feat_channels=vis_feat_channels,
+                               text_feat_channels=text_feat_channels, 
+                               num_heads=num_heads, 
+                               is_inplace=is_inplace,
+                               use_cross_attn=False)
+        self.norm1 = nn.LayerNorm(vis_feat_channels)
 
-        self.ff = FeedForward(feat_channels)
-        self.norm3 = nn.LayerNorm(feat_channels)
+        self.attn2 = AttnBlock(vis_feat_channels=vis_feat_channels,
+                               text_feat_channels=text_feat_channels, 
+                               num_heads=num_heads, 
+                               is_inplace=is_inplace,
+                               use_cross_attn=use_cross_attn)
+        self.norm2 = nn.LayerNorm(vis_feat_channels)
+
+        self.ff = FeedForward(vis_feat_channels)
+        self.norm3 = nn.LayerNorm(vis_feat_channels)
     
-    def forward(self, x: torch.Tensor, cond: Union[torch.Tensor, None]) -> torch.Tensor:
-        """ do the cross attention between x and cond, when cond is None, do the self attention
+    def forward(self, vis_feat: torch.Tensor, text_feat: torch.Tensor) -> torch.Tensor:
+        """ do the cross attention between vis_feat and text_feat, when cond is None, do the self-attention twice.
 
         Args:
-            x (torch.Tensor): input tensor, with size of (batch_size, width*height, n_channels)
-            cond (Union[torch.Tensor, None]): the conditioning tensor, with size of (batch_size, condition_dim, n_channels)
+            vis_feat (torch.Tensor): the visual feature maps, with shape (B, (H*W), vis_feat_channels)
+            text_feat (torch.Tensor, optional): the textual conditional embeddings, with shape (B, emb_size, text_feat_channels)
 
         Returns:
-            torch.Tensor: the output tensor, with size of (batch_size, width*height, n_channels)
-        """        
-        # self-attention
-        x = x + self.attn1(self.norm1(x), None)
-        # cross-attention
-        x = x + self.attn2(self.norm2(x), cond)
-        x = x + self.ff(self.norm3(x))
-        return x
+            torch.Tensor: the output tensor, with size of (B, (H*W), vis_feat_channels)
+        """
+        # self-attention with residual connection
+        vis_feat = vis_feat + self.attn1(self.norm1(vis_feat), None)
+        # cross-attention if text_feat is not None, else still do self-attention
+        vis_feat = vis_feat + self.attn2(self.norm2(vis_feat), text_feat)
+        # feed-forward network with residual connection
+        vis_feat = vis_feat + self.ff(self.norm3(vis_feat))
+        return vis_feat
 
 class SpatialTransformer(nn.Module):
-    def __init__(self, feat_channels: int, cond_channels: int, n_heads: int, n_layers: int):
+    def __init__(self, 
+                 vis_feat_channels: int, 
+                 text_feat_channels: int, 
+                 num_heads: int,
+                 num_groups: int, 
+                 num_transformers: int,
+                 *,
+                 is_inplace: bool=True,
+                 use_cross_attn: bool=False):
         """ Spatial Transformer
 
         Args:
-            feat_channels (int): the number of channels of the input
-            cond_channels (int): the number of channels of conditioning vector
-            n_heads (int): the number of heads
-            n_layers (int): the number of transformer layers
+            vis_feat_channels (int): the number of channels of visual feature maps
+            text_feat_channels (int): the number of channels of textual conditional embeddings
+            num_heads (int): the number of heads
+            num_transformers (int): the number of transformer layers
         """ 
         super().__init__()
-        self.norm = nn.GroupNorm(num_groups=32, num_channels=feat_channels, eps=1e-6, affine=True)
-        self.proj_in = nn.Conv2d(feat_channels, feat_channels, kernel_size=1, stride=1, padding=0)
-        self.transformer_blocks = nn.ModuleList([
-            BasicTransformerBlock(feat_channels, cond_channels, n_heads, feat_channels // n_heads) for _ in range(n_layers)
-        ])
-        self.proj_out = nn.Conv2d(feat_channels, feat_channels, kernel_size=1, stride=1, padding=0)
+        assert vis_feat_channels % num_heads == 0, "vis_feat_channels must be divisible by num_heads"
+        
+        self.use_cross_attn = use_cross_attn
+        self.text_feat_channels = text_feat_channels
 
-    def forward(self, x: torch.Tensor, cond: Union[torch.Tensor, None]) -> torch.Tensor:
-        """ do the spatial transformation
+        self.norm = nn.GroupNorm(num_groups=num_groups, 
+                                 num_channels=vis_feat_channels, 
+                                 eps=1e-6, 
+                                 affine=True)
+        self.proj_in = nn.Conv2d(vis_feat_channels, vis_feat_channels, kernel_size=1, stride=1, padding=0)
+        self.transformer_blocks = nn.ModuleList([
+            BasicTransformerBlock(vis_feat_channels=vis_feat_channels, 
+                                  text_feat_channels=text_feat_channels, 
+                                  num_heads=num_heads, 
+                                  is_inplace=is_inplace,
+                                  use_cross_attn=use_cross_attn) 
+                                  for _ in range(num_transformers)
+        ])
+        self.proj_out = nn.Conv2d(vis_feat_channels, vis_feat_channels, kernel_size=1, stride=1, padding=0)
+
+    def forward(self, vis_feat: torch.Tensor, text_feat: torch.Tensor) -> torch.Tensor:
+        """ do the cross attention between vis_feat and text_feat, when cond is None, do the self-attention
 
         Args:
-            x (torch.Tensor): the input tensor, with size of (batch_size, n_channels, height, width)
-            cond (Union[torch.Tensor, None]): the conditioning tensor, with size of (batch_size, n_channels, d_cond)
+            vis_feat (torch.Tensor): the visual feature maps, with shape (B, vis_feat_channels, H, W)
+            text_feat (torch.Tensor, optional): the textual conditional embeddings, with shape (B, text_feat_channels, emb_size)
 
         Returns:
-            torch.Tensor: the output tensor, with size of (batch_size, channels, height, width)
+            torch.Tensor: the output tensor, with size of (batch_size, vis_feat_channels, H, W)
         """        
-        b, c, h, w = x.shape
-        x_in = x
-        x = self.norm(x)
-        x = self.proj_in(x)
-        x = x.permute(0, 2, 3, 1).contiguous().view(b, h * w, c)
+        if self.use_cross_attn:
+            assert text_feat is not None, "text_feat must be provided when using cross attention"
+        _, _, h, w = vis_feat.shape
+        vis_feat_in = vis_feat
+        vis_feat = self.norm(vis_feat)
+        vis_feat = self.proj_in(vis_feat)
+
+        vis_feat = rearrange(vis_feat, 'b c x y -> b (x y) c', x=h, y=w)
+        text_feat = rearrange(text_feat, 'b c e -> b e c') if text_feat is not None else None
 
         for block in self.transformer_blocks:
-            if cond is not None:
-                cond = cond.permute(0, 2, 1).contiguous()
-            x = block(x, cond)
+            vis_feat = block(vis_feat, text_feat)
         
-        x = x.view(b, h, w, c).permute(0, 3, 1, 2).contiguous()
-        x = self.proj_out(x)
-        return x + x_in
+        vis_feat = rearrange(vis_feat, 'b (x y) c -> b c x y', x=h, y=w)
+        vis_feat = self.proj_out(vis_feat)
+        return vis_feat + vis_feat_in
+
 
 def _test_attention():
-    attn = AttnBlock(feat_channels=64, n_heads=8, d_head=32)
-    x = torch.randn(2, 64, 16, 16)
-    print(f"Input shape: {x.shape}")
-    out = attn(x)
-    print(f"Output shape: {out.shape}")
-
-def _test_linear_attention():
-    attn = LinearAttnBlock(feat_channels=64, n_heads=8, d_head=32)
-    x = torch.randn(2, 64, 16, 16)
-    print(f"Input shape: {x.shape}")
-    out = attn(x)
-    print(f"Output shape: {out.shape}")
-
-def _test_cross_attention():
-    attn = CrossAttnBlock(feat_channels=64, cond_channels=16, n_heads=4, d_head=32)
-    x = torch.randn(2, 64, 64)
-    cond = torch.randn(2, 10, 16)
-    print(f"Input shape: {x.shape}")
+    attn = AttnBlock(vis_feat_channels=64, 
+                     text_feat_channels=3,
+                     num_heads=4)
+    x = torch.randn(2, 256, 64)
+    cond = torch.randn(2, 128, 3)
+    print(f"Input feature map shape: {x.shape}")
     print(f"Conditioning shape: {cond.shape}")
-    out = attn(x, cond)
+    out = attn(x, None)
     print(f"Output shape: {out.shape}")
 
 def _test_basic_transformer_block():
-    block = BasicTransformerBlock(feat_channels=64, cond_channels=32, n_heads=4, d_head=64)
-    x = torch.randn(2, 16, 64)
-    cond = torch.randn(2, 1, 32)
-    print(f"Input shape: {x.shape}")
-    print(f"Conditioning shape: {cond.shape}")
+    block = BasicTransformerBlock(vis_feat_channels=64, 
+                                  text_feat_channels=3, 
+                                  num_heads=4)
+    x = torch.randn(2, 256, 64)
+    print(f"Input feature map shape: {x.shape}")
+    cond = torch.randn(2, 128, 3)
+    print(f"Conditioning embedding shape: {cond.shape}")
     out = block(x, cond)
-    print(f"Output shape: {out.shape}")
+    print(f"Output feature map shape: {out.shape}")
 
 def _test_spatial_transformer():
-    st = SpatialTransformer(feat_channels=64, cond_channels=3, n_heads=4, n_layers=1)
+    st = SpatialTransformer(vis_feat_channels=64, 
+                            text_feat_channels=3, 
+                            num_heads=4, 
+                            num_groups=32, 
+                            num_transformers=1,
+                            is_inplace=True,
+                            use_cross_attn=False)
     x = torch.randn(2, 64, 16, 16)
     print(f"Input feature map shape: {x.shape}")
-    cond = torch.randn(2, 3, 64)
-    print(f"Conditioning vector shape: {cond.shape}")
+    cond = torch.randn(2, 3, 128)
+    print(f"Conditioning embedding shape: {cond.shape}")
     out = st(x, cond)
     print(f"Output feature map shape: {out.shape}")
 
-if __name__ == '__main__':
+if __name__ == '__main__':\
     # _test_attention()
-    # _test_linear_attention()
-    # _test_cross_attention()
     # _test_basic_transformer_block()
     _test_spatial_transformer()
 
