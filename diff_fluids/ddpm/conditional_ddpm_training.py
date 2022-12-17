@@ -18,7 +18,7 @@ matplotlib.use('Agg')
 
 parse = argparse.ArgumentParser(description='Denoising Diffusion Training')
 
-parse.add_argument('--experiment', type=str, help="the name of the experiment, e.g. 'exp1' ")
+parse.add_argument('--experiment', type=str, help="the no. of the experiment, e.g. 'exp1' ")
 
 parse.add_argument('--device', type=int, default=0, help='device to use (default 0)')
 parse.add_argument('--debug', action='store_true', help='debug mode, default False')
@@ -38,30 +38,30 @@ class Trainer:
             logging.basicConfig(level=logging.DEBUG, format='%(levelname)s:%(asctime)s:%(message)s')
         else:
             logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(asctime)s:%(message)s')
-            self.tb_writer = SummaryWriter(log_dir=self.tb_writer_root + args.experiment_name +'/')
+            self.tb_writer = SummaryWriter(log_dir=self.tb_writer_root + self.experiment_name +'/')
 
-        self.eps_model = UNet(**configs['unet_params'])
+        self.eps_model = UNet(**configs['unet_architecture'])
 
         self.diffuser = DenoisingDiffusion(
             eps_model=self.eps_model,
             **configs['ddpm_params']
         ).cuda(args.device)
 
-        if configs['dataset']['dataset_used'] == 'smoke_small':
+        if configs['dataset']['dataset_name'] == 'smoke_small':
             self.init_seed = torch.randn((4, 1, 64, 64))
             # inital condition for testing [t,    x,    y]
             self.init_cond = torch.tensor([[10.0, 23.0, 6.0],
                                            [20.0, 23.0, 6.0],
                                            [30.0, 23.0, 6.0],
                                            [40.0, 23.0, 6.0]])
-        elif configs['dataset']['dataset_used'] == 'smoke_medium':
+        elif configs['dataset']['dataset_name'] == 'smoke_medium':
             self.init_seed = torch.randn((4, 1, 64, 64))
             # inital condition for testing [t,    x,    y]
             self.init_cond = torch.tensor([[10.0, 37.0, 6.0],
                                            [20.0, 37.0, 6.0],
                                            [30.0, 37.0, 6.0],
                                            [40.0, 37.0, 6.0]])
-        elif configs['dataset']['dataset_used'] == 'smoke_large':
+        elif configs['dataset']['dataset_name'] == 'smoke_large':
             self.init_seed = torch.randn((4, 1, 96, 96))
             # inital condition for testing [t,    x,    y]
             self.init_cond = torch.tensor([[10.0, 28.0, 13.0],
@@ -89,7 +89,7 @@ class Trainer:
                                     pin_memory=False)
 
         self.optimizer = torch.optim.Adam(self.diffuser.eps_model.parameters(), lr=self.lr)
-        lf = lambda x: ((1 + math.cos(x * math.pi / args.epochs)) / 2) * (1 - self.lrf) + self.lrf
+        lf = lambda x: ((1 + math.cos(x * math.pi / self.n_epochs)) / 2) * (1 - self.lrf) + self.lrf
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
 
         logging.info('Configs initialized')
@@ -106,6 +106,7 @@ class Trainer:
             for i, batch in enumerate(pbar):
                 density = batch[0].cuda(self.args.device)
                 cond = batch[-1].cuda(self.args.device)
+                cond[:, 0] = cond[:, 0] / 50.0
                 loss = self.diffuser.ddpm_loss(density, cond)
                 cum_loss += loss.item()
                 self.optimizer.zero_grad()
@@ -136,9 +137,9 @@ class Trainer:
 if __name__ == '__main__':
     args = parse.parse_args()
     with open("config.yaml", "r") as file:
-        configs = yaml.load(file, Loader=yaml.FullLoader)
+        configs = yaml.load(file, Loader=yaml.FullLoader)[str(args.experiment)]
     trainer = Trainer(args=args, configs=configs)
-    configs.train()
+    trainer.train()
 
 
 

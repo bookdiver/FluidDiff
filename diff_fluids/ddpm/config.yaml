@@ -1,31 +1,25 @@
 # This file is to store the configuration for ddpm
-Exp1:
+exp1:
   dataset:
     dataset_name: "smoke_small"
     dataset_root: "/media/bamf-big/gefan/DiffFluids/data/smoke/"
 
   training_params:
-    learning_rate: 2e-4
+    learning_rate: 0.0005
     learning_rate_final: 0.1
-    n_epochs: 50
-    batch_size: 32
+    n_epochs: 30
+    batch_size: 16
 
   ddpm_params:
-    n_diffusion_steps: 500
-    betas:
-      - 1e-4
-      - 0.02
+    n_diffusion_steps: 400
+    betas: [0.0001, 0.02]
     
   unet_architecture:
     in_channels: 1
     out_channels: 1
-    cascade_channels:
-      - 32
-      - 64
-      - 128
-      - 256
+    cascade_channels: [32, 32, 64, 128, 256]
     condition_channels: 3
-    embedding_size: 256
+    embedding_size: 128
     down_blocks:
       - "ResDownBlock"
       - "AttnDownBlock"
@@ -37,44 +31,38 @@ Exp1:
       - "AttnUpBlock"
       - "AttnUpBlock"
       - "ResUpBlock"
-    n_res_block: 2
-    n_attn_heads: 8
-    n_res_group: 16
+    n_res_blocks: 2
+    n_attn_heads: 4
+    n_res_groups: 16
     n_attn_groups: 32
     n_transformer_layers: 1
 
   recording_params:
     eval_interval: 5
     tb_writer_root: "/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/logs/"
-    experiment_name: "smoke_small_cat+selfAttn"
+    experiment_name: "smoke_medium_res_new"
     model_save_root: "/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/checkpoint/"
   
 ############################################################################################
-Exp2:
+exp2:
   dataset:
     dataset_name: "smoke_small"
     dataset_root: "/media/bamf-big/gefan/DiffFluids/data/smoke/"
 
   training_params:
-    learning_rate: 1e-5
+    learning_rate: 0.00001
     learning_rate_decay: 0.1
     n_epochs: 20
     batch_size: 4
 
   ddpm_params:
     n_diffusion_steps: 500
-    betas:
-      - 1e-4
-      - 0.02
+    betas: [0.0001, 0.02]
     
   unet_architecture:
     in_channels: 1
     out_channels: 1
-    cascade_channels:
-      - 32
-      - 64
-      - 128
-      - 256
+    cascade_channels: [32, 64, 128, 256, 512]
     condition_channels: 3
     embedding_size: 256
     down_blocks:
@@ -88,9 +76,9 @@ Exp2:
       - "XAttnUpBlock"
       - "XAttnUpBlock"
       - "ResUpBlock"
-    n_res_block: 2
+    n_res_blocks: 2
     n_attn_heads: 8
-    n_res_group: 16
+    n_res_groups: 16
     n_attn_groups: 32
     n_transformer_layers: 1
 

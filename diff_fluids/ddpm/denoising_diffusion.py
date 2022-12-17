@@ -97,7 +97,7 @@ class DenoisingDiffusion(nn.Module):
         x_t = x0
 
         for i in tqdm(range(self.n_diffusion_steps, 0, -1)):
-            t_is = torch.tensor([i / self.n_diffusion_steps]).repeat(x_t.shape[0]).to(self.device)
+            t_is = torch.tensor([i / self.n_diffusion_steps]).repeat(x_t.shape[0]).to(x0.device)
 
             z = torch.randn_like(x_t) if i > 1 else 0
 
