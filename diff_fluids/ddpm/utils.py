@@ -1,66 +1,38 @@
+import h5py
 import torch
 from torch.utils.data import Dataset
-from torchvision import transforms
-import numpy as np
 
+class FluidDataset(Dataset):
+    def __init__(self, 
+                name: str,
+                root: str):
+        with h5py.File(root+name, 'r') as f:
+            b, trange, h, w = f['NavierStokes2D']['u'].shape
+            self.n_samples = b * trange
+            self.u = torch.from_numpy(f['NavierStokes2D']['u'][:].reshape(-1, h, w)).float()
+            self.vx = torch.from_numpy(f['NavierStokes2D']['vx'][:].reshape(-1, h, w)).float()
+            self.vy = torch.from_numpy(f['NavierStokes2D']['vy'][:].reshape(-1, h, w)).float()
+            self.src = torch.from_numpy(f['NavierStokes2D']['src'][:]).unsqueeze(1).repeat(1, trange, 1, 1)
+            self.src = self.src.reshape(-1, h, w).float()
+            self.t = torch.from_numpy(f['NavierStokes2D']['t'][:]).float()
+            t_max = self.t[0].max().item()
+            self.t = self.t / t_max
+            self.t = self.t[..., None, None].repeat(1, 1, h, w)
+            self.t = self.t.reshape(-1, h, w)
+        print(f"Loaded {self.n_samples} samples from {name} in {root}.")
+    
+    def __len__(self):
+        return self.n_samples
 
-class FluidDataSet(Dataset):
-    """ 
-    Customized dataset for smoke simulation, the data npz file should contain the following keys:
-    'log_params': dict of simulation parameters
-    'log_density': (N, B, H, W) the density, N is the number of frames, B is the batch size, H and W are the height and width of the frame
-    'log_velocity': (N, B, H, W, 2) the velocity, N is the number of frames, B is the batch size, H and W are the height and width of the frame, the last dimension is the x and y velocity
-    'log_time': (N, B) the time of each frame, N is the number of frames, B is the batch size, which is consistent along the batch dimension
-    (NOTE: the batch dimension here is just for multiple simulations, which differs from the batch dimension in the training process)
-    """
-    def __init__(self, dataset_root: str, dataset_name: str, normalized: bool=True) -> None:
-        """
-        The individual dataset should be the following format:
-        self.density: (N*B, 1, H, W)
-        self.velocity: (N*B, 2, H, W) (NOTE: for the 2nd dimension, the 1st one is the y conponent, the 2nd one is the x component)
-        self.conditions: (N*B, 3)
-        """
-        self.data = np.load(dataset_root+dataset_name+'.npz', allow_pickle=True)
-        self.density = torch.from_numpy(self.data['log_density']).float().flatten(start_dim=0, end_dim=1).unsqueeze(1)
-        self.velocity = torch.from_numpy(self.data['log_velocity']).float().flatten(start_dim=0, end_dim=1).permute(0, 3, 1, 2)
-        self.conditions = torch.from_numpy(self.data['log_condition']).float().flatten(start_dim=0, end_dim=1)
-        self.transform = transforms.Compose([
-            transforms.Normalize(mean=[0.5], std=[0.5]) if normalized else transforms.Lambda(lambda x: x)
-        ])
-        self.density = self.transform(self.density)
-        # TODO: the time channel needs to be normalized
-
-    def __getitem__(self, index: int) -> tuple:
-        frame_rho = self.density[index]
-        frame_vel = self.velocity[index]
-        frame_con = self.conditions[index]
-        return (frame_rho, frame_vel, frame_con)
-    
-    def __len__(self) -> int:
-        return self.density.shape[0]
-    
-    def find_idxs(self, conditions: torch.Tensor) -> list:
-        """
-        Find the index of the frames with the given condition
-        """
-        idxs = []
-        for cond in conditions:
-            idx = torch.where(torch.all(torch.eq(self.conditions, cond), dim=1))[0]
-            idxs.append(idx.item() if idx.shape[0] > 0 else None)
-        return idxs
-    
-    def get_ground_truths(self, conditions: torch.Tensor) -> list:
-        """
-        Get the ground truth of the frame with the given index
-        """
-        idxs = self.find_idxs(conditions)
-        truths = []
-        for idx in idxs:
-            if idx is None:
-                truths.append(None)
-            else:
-                truths.append((self.density[idx], self.velocity[idx]))
-        return truths
+    def __getitem__(self, idx):
+        u = self.u[idx].unsqueeze(0)
+        vx = self.vx[idx].unsqueeze(0)
+        vy = self.vy[idx].unsqueeze(0)
+        src = self.src[idx].unsqueeze(0)
+        t = self.t[idx].unsqueeze(0)
+        return {"u": u,
+                "v": torch.cat([vx, vy], dim=0), 
+                "y": torch.cat([src, t], dim=0)}
     
 
 

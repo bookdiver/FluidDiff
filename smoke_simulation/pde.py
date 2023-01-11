@@ -9,21 +9,22 @@ class PDEConfig:
 
 @dataclass
 class NavierStokes2D(PDEConfig):
-    tmin: float = 0
-    tmax: float = 20.0
-    Lx: float = 32.0
-    Ly: float = 32.0
-    nt: int = 500
-    nx: int = 128
-    ny: int = 128
-    skip_nt: int = 0
-    sample_rate: int = 5
-    nu: float = 0.03
-    buoyancy_x: float = 0.0
-    buoyancy_y: float = 0.05
-    source_ycoord: float = 5.0
-    source_strength: float = 1.0
-    source_radius: float = 2.0
+    tmin: float
+    tmax: float
+    Lx: float 
+    Ly: float 
+    nt: int 
+    nx: int
+    ny: int 
+    skip_nt: int 
+    sample_rate: int 
+    nu: float 
+    buoyancy_x: float 
+    buoyancy_y: float 
+    source_coord: list
+    source_strength: float 
+    source_radius: float 
+    samples: int
 
     def __repr__(self):
         return "NavierStokes2D"

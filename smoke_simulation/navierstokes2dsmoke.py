@@ -15,6 +15,7 @@ from phi.torch.flow import (  # SoftGeometryMask,;
     diffuse,
     extrapolation,
     fluid,
+    TORCH
 )
 from phi.math import reshaped_native
 from tqdm import tqdm
@@ -26,24 +27,27 @@ logger = logging.getLogger(__name__)
 
 def generate_trajectories_smoke(
     pde: PDEConfig,
-    num_samples: int,
+    mode: str,
     dirname: str = "../data"
 ) -> None:
     """
     Generate data trajectories for smoke inflow in bounded domain
     Args:
         pde (PDE): pde at hand [NS2D]
-        num_samples (int): how many trajectories do we create
+        pde.samples (int): how many trajectories do we create
     Returns:
         None
     """
 
+    TORCH.set_default_device('GPU')
+
     pde_string = str(pde)
     logger.info(f"Equation: {pde_string}")
     logger.info("Experiment: 2D smoke simulation with different source locations")
-    logger.info(f"Number of samples: {num_samples}")
+    logger.info(f"Mode: {mode}")
+    logger.info(f"Number of samples: {pde.samples}")
 
-    save_name = os.path.join(dirname, "_".join(["res", str(pde.nx), str(pde.ny), "nsrcs", str(num_samples)]))
+    save_name = os.path.join(dirname, "_".join(["NSPointSrcSmoke", "resolution", f"{pde.nx}x{pde.ny}", mode]))
     h5f = h5py.File("".join([save_name, ".h5"]), "a")
     dataset = h5f.create_group(pde_string)
 
@@ -53,17 +57,15 @@ def generate_trajectories_smoke(
     nt, nx, ny = pde.grid_size[0], pde.grid_size[1], pde.grid_size[2]
     # The scalar field u, the components of the vector field vx, vy,
     # the coordinations (tcoord, xcoord, ycoord) and dt, dx, dt are saved
-    h5f_u = dataset.create_dataset("u", (num_samples, nt, nx, ny), dtype=float)
-    h5f_vx = dataset.create_dataset("vx", (num_samples, nt, nx, ny), dtype=float)
-    h5f_vy = dataset.create_dataset("vy", (num_samples, nt, nx, ny), dtype=float)
-    h5f_src = dataset.create_dataset("src", (num_samples, nx, ny), dtype=float)
-    tcoord = dataset.create_dataset("t", (num_samples, nt), dtype=float)
-    dt = dataset.create_dataset("dt", (num_samples,), dtype=float)
+    h5f_u = dataset.create_dataset("u", (pde.samples, nt, nx, ny), dtype=float)
+    h5f_vx = dataset.create_dataset("vx", (pde.samples, nt, nx, ny), dtype=float)
+    h5f_vy = dataset.create_dataset("vy", (pde.samples, nt, nx, ny), dtype=float)
+    h5f_src = dataset.create_dataset("src", (pde.samples, nx, ny), dtype=float)
+    tcoord = dataset.create_dataset("t", (pde.samples, nt), dtype=float)
+    dt = dataset.create_dataset("dt", (pde.samples,), dtype=float)
 
     def genfunc():
-        src_locs = np.asarray([(32. / 2. + i*6*0.25, 5.0+j*8*0.25) 
-                       for i in range(-16//2, 16//2+1)
-                       for j in range(0, 4)])
+        src_locs = np.asarray(pde.source_coord)
         inflow_locs = tensor(src_locs, batch('inflow_loc'), channel(vector='x, y'))
         inflow = CenteredGrid(
             Sphere(center=inflow_locs, radius=pde.source_radius),
@@ -88,7 +90,7 @@ def generate_trajectories_smoke(
         )  # sampled in staggered form at face centers
         fluid_field_ = []
         velocity_ = []
-        for i in tqdm(range(0, pde.nt + pde.skip_nt)):
+        for i in tqdm(range(0, pde.nt+pde.skip_nt)):
             smoke = advect.semi_lagrangian(smoke, velocity, pde.dt) + pde.source_strength * inflow * pde.dt
             buoyancy_force = (smoke * (pde.buoyancy_x, pde.buoyancy_y)).at(velocity)  # resamples smoke to velocity sample points
             velocity = advect.semi_lagrangian(velocity, velocity, pde.dt) + pde.dt * buoyancy_force
@@ -125,7 +127,7 @@ def generate_trajectories_smoke(
     logger.info(f"Took {gentime.dt:.3f} seconds")
 
     with utils.Timer() as writetime:
-        for idx in range(num_samples):
+        for idx in range(pde.samples):
             # fmt: off
             # Saving the trajectories
             h5f_u[idx, ...] = fluid_field[idx, ...]

@@ -60,7 +60,7 @@ class DenoisingDiffusion(nn.Module):
             'mab_over_sqrtmab': mab_over_sqrtmab_inv,  # (1-\alpha_t)/\sqrt{1-\bar{\alpha_t}},
         }
     
-    def ddpm_loss(self, x: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
+    def ddpm_loss(self, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """ This function is used to compute the loss of DDPM.
 
         Args:
@@ -78,13 +78,13 @@ class DenoisingDiffusion(nn.Module):
         x_t = (sqrtab * x + sqrtmab * noise)
         # This is the x_t, which is sqrt(alphabar) x_0 + sqrt(1-alphabar) * eps
         # the noisy term in loss
-        
+    
         # return MSE between added noise, and our predicted noise
-        loss = self.mse_loss(noise, self.eps_model(x_t, _ts, cond))
+        loss = self.mse_loss(noise, self.eps_model(x_t, _ts, y))
         return loss
     
     @torch.no_grad()
-    def sample(self, x0: torch.Tensor, cond: Optional[torch.Tensor]=None) -> torch.Tensor:
+    def sample(self, x0: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         """ This function is used to sample from DDPM.
 
         Args:
@@ -101,7 +101,7 @@ class DenoisingDiffusion(nn.Module):
 
             z = torch.randn_like(x_t) if i > 1 else 0
 
-            noise_pred = self.eps_model(x_t, t_is, cond)
+            noise_pred = self.eps_model(x_t, t_is, y)
             x_t = self.oneover_sqrta[i] * (x_t - noise_pred * self.mab_over_sqrtmab[i]) + self.sqrt_beta_t[i] * z
         
         return x_t
