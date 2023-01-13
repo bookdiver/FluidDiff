@@ -1,0 +1,24 @@
+# This file is to store the configuration for ddpm
+dataset:
+  fileroot: "../../../data/"
+  filename: "2DNSFullSmoke"
+  is_test: False
+  reduced_batch_factor: 1
+  reduced_time_factor: 1
+  reduced_resolution_factor: 1
+
+training_params:
+  learning_rate: 0.0001
+  learning_rate_final: 0.1
+  n_epochs: 30
+  batch_size: 32
+
+model:
+  in_channels: 2
+  out_channels: 3
+  init_features: 32
+  
+recording_params:
+  eval_interval: 5
+  tb_writer_root: "./logs/"
+  model_save_root: "./checkpoint/"

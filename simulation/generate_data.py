@@ -5,7 +5,8 @@ import sys
 from omegaconf import OmegaConf
 from pytorch_lightning.cli import instantiate_class
 
-from navierstokes2dsmoke import generate_trajectories_smoke
+from nspointsmoke2d import generate_trajectories_pointsmoke
+from nsfullsmoke2d import generate_trajectories_fullsmoke
 
 def main(cfg):
     os.makedirs(cfg.dirname, exist_ok=True)
@@ -17,17 +18,34 @@ def main(cfg):
         if len(exiting_files) > 0:
             raise SystemExit("Data files already exist. Exiting.")
 
-    if cfg.experiment == "smoke2d":
+    if cfg.experiment == "pointsmoke":
         if cfg.mode == 'train':
             pde = instantiate_class(tuple(), cfg.pdeconfig.train)
-            generate_trajectories_smoke(
+            generate_trajectories_pointsmoke(
                 pde=pde,
                 mode=cfg.mode,
                 dirname=cfg.dirname,
             )
         elif cfg.mode == 'test':
             pde = instantiate_class(tuple(), cfg.pdeconfig.test)
-            generate_trajectories_smoke(
+            generate_trajectories_pointsmoke(
+                pde=pde,
+                mode=cfg.mode,
+                dirname=cfg.dirname,
+            )
+        else:
+            raise NotImplementedError()
+    elif cfg.experiment == "fullsmoke":
+        if cfg.mode == 'train':
+            pde = instantiate_class(tuple(), cfg.pdeconfig.train)
+            generate_trajectories_fullsmoke(
+                pde=pde,
+                mode=cfg.mode,
+                dirname=cfg.dirname,
+            )
+        elif cfg.mode == 'test':
+            pde = instantiate_class(tuple(), cfg.pdeconfig.test)
+            generate_trajectories_fullsmoke(
                 pde=pde,
                 mode=cfg.mode,
                 dirname=cfg.dirname,

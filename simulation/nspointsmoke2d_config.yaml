@@ -3,20 +3,18 @@ experiment: ???
 mode: ???
 pdeconfig:
   train:
-    class_path: pde.NavierStokes2D
+    class_path: pde.NSPointSmoke2D
     init_args:
-      tmin: 0.1
       tmax: 50.0
-      Lx: 16.0  # the physical size of x
-      Ly: 16.0  # the physical size of y
-      nt: 500 # number of timesteps at minimum dt
-      nx: 64 # spatial resolution on x-axis
-      ny: 64 # spatial resolution on y-axis
-      skip_nt: 0 # initial timesteps to ignore
-      sample_rate: 5 # sampling rate of data as a multiple of minumum dt
+      skip_t: 0.1
+      Lx: 16.0 
+      Ly: 16.0  
+      nt: 500
+      nx: 64 
+      ny: 64
+      t_sample_rate: 5
       nu: 0.03 # viscosity
-      buoyancy_x: 0.0 # bouyancy force in horizontal direction
-      buoyancy_y: 1.0 # bouyancy force in vertical direction
+      buoyancy: 1.0 # bouyancy force in vertical direction
       source_coord: [[2.0, 3.0], [2.0, 4.0], [2.0, 5.0], [2.0, 6.0], [2.0, 7.0], 
                      [3.0, 3.0], [3.0, 4.0], [3.0, 5.0], [3.0, 6.0], [3.0, 7.0], 
                      [4.0, 3.0], [4.0, 4.0], [4.0, 5.0], [4.0, 6.0], [4.0, 7.0], 
@@ -31,25 +29,21 @@ pdeconfig:
                      [13.0, 3.0], [13.0, 4.0], [13.0, 5.0], [13.0, 6.0], [13.0, 7.0]]
       source_strength: 1.0
       source_radius: 0.5
-      samples: 48
   
   test:
-    class_path: pde.NavierStokes2D
+    class_path: pde.NSPointSmoke2D
     init_args:
-      tmin: 0.05
       tmax: 50.0
-      Lx: 16.0  # the physical size of x
+      skip_t: 0.05
+      Lx: 16.0  
       Ly: 16.0  # the physical size of y
       nt: 1000 # number of timesteps at minimum dt
       nx: 64 # spatial resolution on x-axis
       ny: 64 # spatial resolution on y-axis
-      skip_nt: 0 # initial timesteps to ignore
-      sample_rate: 5 # sampling rate of data as a multiple of minumum dt
+      t_sample_rate: 5 # sampling rate of data as a multiple of minumum dt
       nu: 0.03 # viscosity
-      buoyancy_x: 0.0 # bouyancy force in horizontal direction
-      buoyancy_y: 1.0 # bouyancy force in vertical direction
+      buoyancy: 1.0 # bouyancy force in vertical direction
       source_coord: [[7.5, 3.0], [8.0, 5.5], [8.5, 6.5], [3.5, 3.5], [14.0, 2.5], [15.0, 9.0]]
       source_strength: 1.0
       source_radius: 0.5
-      samples: 6
 overwrite: True

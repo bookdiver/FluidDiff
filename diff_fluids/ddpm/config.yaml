@@ -1,17 +1,17 @@
 # This file is to store the configuration for ddpm
 dataset:
-  name: "NSPointSrcSmoke_resolution_64x64_train.h5"
-  root: "/media/bamf-big/gefan/DiffFluids/data/2d_floating_smoke/"
+  name: "2DNSFullSmoke"
+  root: "/media/bamf-big/gefan/DiffFluids/data/"
 
 training_params:
   learning_rate: 0.0001
   learning_rate_final: 0.1
-  n_epochs: 30
+  n_epochs: 20
   batch_size: 8
   patience: 20
 
 diffuser:
-  n_diffusion_steps: 500
+  n_diffusion_steps: 600
   betas: [0.0001, 0.02]
   
 eps_model:

@@ -21,11 +21,10 @@ from phi.math import reshaped_native
 from tqdm import tqdm
 
 from pde import PDEConfig
-import utils
 
 logger = logging.getLogger(__name__)
 
-def generate_trajectories_smoke(
+def generate_trajectories_pointsmoke(
     pde: PDEConfig,
     mode: str,
     dirname: str = "../data"
@@ -45,24 +44,23 @@ def generate_trajectories_smoke(
     logger.info(f"Equation: {pde_string}")
     logger.info("Experiment: 2D smoke simulation with different source locations")
     logger.info(f"Mode: {mode}")
-    logger.info(f"Number of samples: {pde.samples}")
+    logger.info(f"Number of samples: {pde.n_samples}")
 
-    save_name = os.path.join(dirname, "_".join(["NSPointSrcSmoke", "resolution", f"{pde.nx}x{pde.ny}", mode]))
+    save_name = os.path.join(dirname, "_".join(["NSPointSmoke2D", "resolution", f"{pde.nx}x{pde.ny}", mode]))
     h5f = h5py.File("".join([save_name, ".h5"]), "a")
-    dataset = h5f.create_group(pde_string)
 
     tcoord = {}
     h5f_u, h5f_vx, h5f_vy, h5f_src = {}, {}, {}, {}
 
-    nt, nx, ny = pde.grid_size[0], pde.grid_size[1], pde.grid_size[2]
+    nt, nx, ny = pde.grid_size['t'], pde.grid_size['x'], pde.grid_size['y']
     # The scalar field u, the components of the vector field vx, vy,
     # the coordinations (tcoord, xcoord, ycoord) and dt, dx, dt are saved
-    h5f_u = dataset.create_dataset("u", (pde.samples, nt, nx, ny), dtype=float)
-    h5f_vx = dataset.create_dataset("vx", (pde.samples, nt, nx, ny), dtype=float)
-    h5f_vy = dataset.create_dataset("vy", (pde.samples, nt, nx, ny), dtype=float)
-    h5f_src = dataset.create_dataset("src", (pde.samples, nx, ny), dtype=float)
-    tcoord = dataset.create_dataset("t", (pde.samples, nt), dtype=float)
-    dt = dataset.create_dataset("dt", (pde.samples,), dtype=float)
+    h5f_u = h5f.create_dataset("u", (pde.n_samples, nt, nx, ny), dtype=float)
+    h5f_vx = h5f.create_dataset("vx", (pde.n_samples, nt, nx, ny), dtype=float)
+    h5f_vy = h5f.create_dataset("vy", (pde.n_samples, nt, nx, ny), dtype=float)
+    h5f_src = h5f.create_dataset("src", (pde.n_samples, nx, ny), dtype=float)
+    tcoord = h5f.create_dataset("t", (pde.n_samples, nt), dtype=float)
+    dt = h5f.create_dataset("dt", (pde.n_samples,), dtype=float)
 
     def genfunc():
         src_locs = np.asarray(pde.source_coord)
@@ -90,9 +88,9 @@ def generate_trajectories_smoke(
         )  # sampled in staggered form at face centers
         fluid_field_ = []
         velocity_ = []
-        for i in tqdm(range(0, pde.nt+pde.skip_nt)):
+        for i in tqdm(range(0, pde.nt)):
             smoke = advect.semi_lagrangian(smoke, velocity, pde.dt) + pde.source_strength * inflow * pde.dt
-            buoyancy_force = (smoke * (pde.buoyancy_x, pde.buoyancy_y)).at(velocity)  # resamples smoke to velocity sample points
+            buoyancy_force = (smoke * (0.0, pde.buoyancy)).at(velocity)  # resamples smoke to velocity sample points
             velocity = advect.semi_lagrangian(velocity, velocity, pde.dt) + pde.dt * buoyancy_force
             velocity = diffuse.explicit(velocity, pde.nu, pde.dt)
             velocity, _ = fluid.make_incompressible(velocity)
@@ -118,27 +116,23 @@ def generate_trajectories_smoke(
         fluid_field_ = np.asarray(fluid_field_[pde.skip_nt :]).transpose((1, 0, 2, 3, 4)).squeeze()
         velocity_corrected_ = np.asarray(velocity_[pde.skip_nt :]).transpose((1, 0, 2, 3, 4)).squeeze()[:, :, :-1, :-1, :]
         init_field_ = np.asarray(init_field_).squeeze()
-        return (fluid_field_[:, :: pde.sample_rate, ...], 
-                velocity_corrected_[:, :: pde.sample_rate, ...], 
+        return (fluid_field_[:, :: pde.t_sample_rate, ...], 
+                velocity_corrected_[:, :: pde.t_sample_rate, ...], 
                 init_field_)
 
-    with utils.Timer() as gentime:
-        fluid_field, velocity_corrected, init_field = genfunc()
-    logger.info(f"Took {gentime.dt:.3f} seconds")
+    fluid_field, velocity_corrected, init_field = genfunc()
 
-    with utils.Timer() as writetime:
-        for idx in range(pde.samples):
-            # fmt: off
-            # Saving the trajectories
-            h5f_u[idx, ...] = fluid_field[idx, ...]
-            h5f_vx[idx, ...] = velocity_corrected[idx][..., 0]
-            h5f_vy[idx, ...] = velocity_corrected[idx][..., 1]
-            h5f_src[idx, ...] = init_field[idx, ...]
-            # fmt:on
-            tcoord[idx, ...] = np.asarray([np.linspace(pde.tmin, pde.tmax+pde.dt*pde.sample_rate, pde.trajlen)])
-            dt[idx] = pde.dt * pde.sample_rate
+    for idx in range(pde.n_samples):
+        # fmt: off
+        # Saving the trajectories
+        h5f_u[idx, ...] = fluid_field[idx, ...]
+        h5f_vx[idx, ...] = velocity_corrected[idx][..., 0]
+        h5f_vy[idx, ...] = velocity_corrected[idx][..., 1]
+        h5f_src[idx, ...] = init_field[idx, ...]
+        # fmt:on
+        tcoord[idx, ...] = np.asarray([np.linspace(pde.skip_t, pde.tmax, pde.trajlen)])
+        dt[idx] = pde.dt * pde.sample_rate
 
-    logger.info(f"Took {writetime.dt:.3f} seconds writing to disk")
 
     print()
     print("Data saved")
