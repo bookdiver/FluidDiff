@@ -1,7 +1,7 @@
 # This file is to store the configuration for ddpm
 dataset:
-  name: "2DNSFullSmoke"
-  root: "/media/bamf-big/gefan/DiffFluids/data/"
+  fileroot: "../../data/"
+  filename: "ns_random_64x64_T50"
 
 training_params:
   learning_rate: 0.0001
@@ -23,5 +23,5 @@ eps_model:
   
 recording_params:
   eval_interval: 5
-  tb_writer_root: "/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/logs/"
-  model_save_root: "/media/bamf-big/gefan/DiffFluids/diff_fluids/ddpm/checkpoint/"
+  tb_writer_root: "./logs/"
+  model_save_root: "./checkpoint/"

@@ -5,69 +5,58 @@ import glob
 
 class FluidDataset(Dataset):
     def __init__(self, 
-                root: str,
-                name: str,
-                mode: str = "train"):
-        assert mode in ['train', 'test'] 
-        "mode must be either 'train' or 'test'"
+                 fileroot: str,
+                 filename: str,
+                 is_test: bool=False,
+                 reduced_batch_factor: int=1,
+                 reduced_time_factor: int=1,
+                 reduced_resolution_factor: int=1):
+        
+        file = glob.glob(fileroot + filename + '/' + ('test' if is_test else 'train') + '*.h5')[0]
+        with h5py.File(file, 'r') as f:
+            b, trange, h, w = f['u'].shape
+            self.data = torch.zeros([(b // reduced_batch_factor) * (trange // reduced_time_factor),
+                                        h // reduced_resolution_factor,
+                                        w // reduced_resolution_factor,
+                                        5])
+            # density
+            _data = torch.from_numpy(f['u'][:]).float()
+            _data = _data[::reduced_batch_factor, ::reduced_time_factor, ::reduced_resolution_factor, ::reduced_resolution_factor]
+            self.data[:, :, :, 0] = _data.reshape(-1, h // reduced_resolution_factor, w // reduced_resolution_factor)
 
-        self.name = name
-        if name == '2DNSPointSmoke':
-            with h5py.File(glob.glob(root+name+'/*'+mode+'.h5')[0], 'r') as f:
-                b, trange, h, w = f[name]['u'].shape
-                self.n_samples = b * trange
-                self.u = torch.from_numpy(f[name]['u'][:].reshape(-1, h, w)).float()
-                self.vx = torch.from_numpy(f[name]['vx'][:].reshape(-1, h, w)).float()
-                self.vy = torch.from_numpy(f[name]['vy'][:].reshape(-1, h, w)).float()
-                self.src = torch.from_numpy(f[name]['src'][:]).unsqueeze(1).repeat(1, trange, 1, 1)
-                self.src = self.src.reshape(-1, h, w).float()
-                self.t = torch.from_numpy(f[name]['t'][:]).float()
-                t_max = self.t[0].max().item()
-                self.t = self.t / t_max
-                self.t = self.t[..., None, None].repeat(1, 1, h, w)
-                self.t = self.t.reshape(-1, h, w)
-        elif name == '2DNSFullSmoke':
-            with h5py.File(glob.glob(root+name+'/*'+mode+'.h5')[0], 'r') as f:
-                b, trange, h, w = f[name]['u'].shape
-                self.n_samples = b * trange
-                self.u = torch.from_numpy(f[name]['u'][:].reshape(-1, h, w)).float()
-                self.vx = torch.from_numpy(f[name]['vx'][:].reshape(-1, h, w)).float()
-                self.vy = torch.from_numpy(f[name]['vy'][:].reshape(-1, h, w)).float()
-                self.u0 = torch.from_numpy(f[name]['u_init'][:]).unsqueeze(1).repeat(1, trange, 1, 1)
-                self.u0 = self.u0.reshape(-1, h, w).float()
-                self.t = torch.from_numpy(f[name]['t'][:]).float()
-                t_max = self.t[0].max().item()
-                self.t = self.t / t_max
-                self.t = self.t[..., None, None].repeat(1, 1, h, w)
-                self.t = self.t.reshape(-1, h, w)
-        else:
-            raise NotImplementedError(f"Dataset {name} not implemented.")
-        print(f"Loaded {self.n_samples} samples from {name} in {root}.")
+            # velocity x
+            _data = torch.from_numpy(f['vx'][:]).float()
+            _data = _data[::reduced_batch_factor, ::reduced_time_factor, ::reduced_resolution_factor, ::reduced_resolution_factor]
+            self.data[:, :, :, 1] = _data.reshape(-1, h // reduced_resolution_factor, w // reduced_resolution_factor)
+
+            # velocity y
+            _data = torch.from_numpy(f['vy'][:]).float()
+            _data = _data[::reduced_batch_factor, ::reduced_time_factor, ::reduced_resolution_factor, ::reduced_resolution_factor]
+            self.data[:, :, :, 2] = _data.reshape(-1, h // reduced_resolution_factor, w // reduced_resolution_factor)
+
+            # initial density
+            _data = torch.from_numpy(f['u0'][:]).float()
+            _data = _data.unsqueeze(1).repeat(1, trange // reduced_time_factor, 1, 1)
+            _data = _data[::reduced_batch_factor, :, ::reduced_resolution_factor, ::reduced_resolution_factor]
+            self.data[:, :, :, 3] = _data.reshape(-1, h // reduced_resolution_factor, w // reduced_resolution_factor)
+
+            # time
+            _data = torch.from_numpy(f['t'][:]).float()
+            t_max = _data[0].max()
+            _data = _data / t_max
+            _data = _data[..., None, None].repeat(1, 1, h // reduced_resolution_factor, w // reduced_resolution_factor)
+            _data = _data[::reduced_batch_factor, ::reduced_time_factor, :, :]
+            self.data[:, :, :, 4] = _data.reshape(-1, h // reduced_resolution_factor, w // reduced_resolution_factor)
     
     def __len__(self):
-        return self.n_samples
+        return len(self.data)
 
     def __getitem__(self, idx):
-        if self.name == '2DNSPointSmoke':
-            u = self.u[idx].unsqueeze(0)
-            vx = self.vx[idx].unsqueeze(0)
-            vy = self.vy[idx].unsqueeze(0)
-            src = self.src[idx].unsqueeze(0)
-            t = self.t[idx].unsqueeze(0)
-            return {"u": u,
-                    "v": torch.cat([vx, vy], dim=0), 
-                    "y": torch.cat([src, t], dim=0)}
-        elif self.name == '2DNSFullSmoke':
-            u = self.u[idx].unsqueeze(0)
-            vx = self.vx[idx].unsqueeze(0)
-            vy = self.vy[idx].unsqueeze(0)
-            u0 = self.u0[idx].unsqueeze(0)
-            t = self.t[idx].unsqueeze(0)
-            return {"u": u,
-                    "v": torch.cat([vx, vy], dim=0), 
-                    "y": torch.cat([u0, t], dim=0)}
-        else:
-            raise NotImplementedError(f"Dataset {self.name} not implemented.")
+        data = self.data[idx]
+        return {
+            'x': data[..., 0:3].permute(2, 0, 1),
+            'y': data[..., 3:5].permute(2, 0, 1)
+        }
     
 
 

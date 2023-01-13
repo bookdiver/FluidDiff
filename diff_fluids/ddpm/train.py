@@ -11,7 +11,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 
 from utils import FluidDataset
-from unet2 import UNet
+from DiffFluids.diff_fluids.ddpm.net import UNet4Diffusion
 from denoising_diffusion import DenoisingDiffusion
 
 matplotlib.use('Agg')
@@ -44,7 +44,7 @@ class Trainer:
             logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(asctime)s:%(message)s')
             self.tb_writer = SummaryWriter(log_dir=self.tb_writer_root + self.savename +'/')
 
-        eps_model = UNet(**configs['eps_model'])
+        eps_model = UNet4Diffusion(**configs['eps_model'])
 
         self.diffuser = DenoisingDiffusion(
             eps_model=eps_model,

@@ -215,7 +215,7 @@ class SinusoidalEmbeddingBlock(nn.Module):
         embedding = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
         return embedding
 
-class UNet(nn.Module):
+class UNet4Diffusion(nn.Module):
     def __init__(self,
                 *,  
                 in_channels: int,
