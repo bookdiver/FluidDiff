@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset
 import glob
 
-class UNetDataset(Dataset):
+class CGANDataset(Dataset):
     def __init__(self, 
                  fileroot: str,
                  filename: str,
