@@ -11,8 +11,8 @@ from tqdm import tqdm
 import matplotlib
 import matplotlib.pyplot as plt
 
-from utils import UNetDataset
-from unet import UNet2d
+from utils import NavierStokesDataset
+from net import UNet
 
 matplotlib.use('Agg')
 
@@ -43,12 +43,10 @@ class Trainer:
             logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(asctime)s:%(message)s')
             self.tb_writer = SummaryWriter(log_dir=self.tb_writer_root + self.savename +'/')
 
-        self.model = UNet2d(**configs['model']).to(self.device)
+        self.model = UNet(**configs['model']).to(self.device)
 
-        dataset = UNetDataset(**configs['dataset'])
-        train_size = int(0.98 * len(dataset))
-        val_size = len(dataset) - train_size
-        train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+        train_dataset = NavierStokesDataset(**configs['dataset'], is_test=False)
+        test_dataset = NavierStokesDataset(**configs['dataset'], is_test=True)
 
         self.n_epochs = configs['training_params']['n_epochs']
         self.lr = configs['training_params']['learning_rate']
@@ -58,12 +56,12 @@ class Trainer:
         self.train_dl = DataLoader(train_dataset, 
                                    batch_size=self.batch_size, 
                                    shuffle=True, 
-                                   num_workers=4, 
+                                   num_workers=8, 
                                    pin_memory=False)
-        self.val_dl = DataLoader(val_dataset,
+        self.test_dl = DataLoader(test_dataset,
                                  batch_size=self.batch_size,
-                                 shuffle=False,
-                                 num_workers=4,
+                                 shuffle=True,
+                                 num_workers=8,
                                  pin_memory=False)
         
         self.l2loss = MSELoss(reduction='mean')
@@ -73,12 +71,8 @@ class Trainer:
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
 
         logging.info("Trainer initialized")
-        logging.info(f"Training set size: {len(self.train_dl.dataset)}")
-        logging.info(f"Validation set size: {len(self.val_dl.dataset)}")
     
     def train(self):
-        train_losses = []
-        val_losses = []
         epoch_len = len(str(self.n_epochs))
 
         for epoch in range(1, 1 + self.n_epochs):
@@ -86,52 +80,44 @@ class Trainer:
             # Training
             self.model.train()
             pbar_train = tqdm(self.train_dl)
-            for _, data in enumerate(pbar_train):
+            for i, data in enumerate(pbar_train):
                 x = data['x'].to(self.device)
                 y = data['y'].to(self.device)
                 x_pred = self.model(y)
                 loss = self.l2loss(x, x_pred)
                 train_loss = loss.item()
-                train_losses.append(train_loss)
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 pbar_train.set_description(f"[{epoch:>{epoch_len}}/{self.n_epochs:>{epoch_len}}] | " +
                                            f"Train Loss: {train_loss:.5f}")
+                if hasattr(self, 'tb_writer'):
+                    self.tb_writer.add_scalar("Train Loss", train_loss, (epoch-1)*len(self.train_dl) + i)
             self.scheduler.step()
 
             # Validation
             self.model.eval()
-            val_loss = 0
-            pbar_val = tqdm(self.val_dl)
-            for _, data in enumerate(pbar_val):
+            cum_val_loss = 0
+            pbar_val = tqdm(self.test_dl)
+            for i, data in enumerate(pbar_val):
                 x = data['x'].to(self.device)
                 y = data['y'].to(self.device)
                 x_pred = self.model(y)
                 loss = self.l2loss(x, x_pred)
-                val_loss = loss.item()
-                val_losses.append(val_loss)
+                cum_val_loss += loss.item()
                 pbar_val.set_description(f"[{epoch:>{epoch_len}}/{self.n_epochs:>{epoch_len}}] | " +
-                                           f"Val Loss: {val_loss:.5f}")
+                                           f"Avg Val Loss: {cum_val_loss / (i+1):.5f}")
 
-            # Record losses
-            if not self.debug:
-                avg_train_loss = sum(train_losses) / len(train_losses)
-                avg_val_loss = sum(val_losses) / len(val_losses)
-                self.tb_writer.add_scalar("Train Loss vs. Epoch", avg_train_loss, epoch)
-                self.tb_writer.add_scalar("Val Loss vs. Epoch", avg_val_loss, epoch)
-            train_losses = []
-            val_losses = []
             
             # Testing
             if epoch % self.eval_interval == 0 or epoch == self.n_epochs:
                 logging.info(f"Evaluating at epoch {epoch}, starting sampling...")
                 with torch.no_grad():
-                    sample = next(iter(self.val_dl))
+                    sample = next(iter(self.test_dl))
                     x = sample['x'][:4]
                     y = sample['y'][:4].to(self.device)
                     x_pred = self.model(y)
-                fig, ax = plt.subplots(6, 4, figsize=(12, 18))
+                fig, ax = plt.subplots(4, 4, figsize=(12, 12))
                 x_pred = x_pred.detach().cpu().numpy()
                 for i in range(4):
                     ax[0, i].imshow(x[i, 0], origin='lower')
@@ -142,13 +128,11 @@ class Trainer:
                     ax[2, i].axis('off')
                     ax[3, i].imshow(x_pred[i, 1], origin='lower')
                     ax[3, i].axis('off')
-                    ax[4, i].imshow(x[i, 2], origin='lower')
-                    ax[4, i].axis('off')
-                    ax[5, i].imshow(x_pred[i, 2], origin='lower')
-                    ax[5, i].axis('off')
-                self.tb_writer.add_figure("Sampling on Test set", fig, epoch)
+                if hasattr(self, 'tb_writer'):
+                    self.tb_writer.add_figure("Sampling on Test set", fig, epoch)
                 plt.close(fig)
-            torch.save(self.model.state_dict(), self.model_save_root + f'{self.savename}.pth')
+            if not self.debug:
+                torch.save(self.model.state_dict(), self.model_save_root + f'{self.savename}.pth')
 
         logging.info('Training finished')
         self.tb_writer.close()

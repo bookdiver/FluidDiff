@@ -1,0 +1,26 @@
+sim_name: 'ns_floating_sim_2d'
+
+# Solver Parameters 
+domain_size: [96.0, 96.0]
+grid_size: [96, 96]
+
+# Fluid characteristics
+nu: 0.03 #(kinematic viscosity)
+bouyancy: 0.5
+
+
+# Fluctuation Generator Parameters (Noise)
+smoothness: 2.0
+scale: 10.0
+
+#params for IncompressibleFlow(Physics)
+n_steps: 1000
+dt : 0.04
+t_sample_interval: 10
+
+n_batch: 1
+
+# Visualisation
+# save_images: false
+# save_gif: false
+

@@ -98,9 +98,9 @@ class UNet(nn.Module):
 
 def _test():
     unet_test = UNet(in_channels=3, out_channels=3, init_features=32)
-    print(unet_test)
+    # print(unet_test)
     print(f"The number of parameters: {sum(p.numel() for p in unet_test.parameters() if p.requires_grad)}")
-    input = torch.randn(4, 3, 64, 64)
+    input = torch.randn(4, 3, 96, 96)
     output = unet_test(input)
     print(output.shape)
 

@@ -1,27 +1,56 @@
 # This file is to store the configuration for ddpm
-dataset:
-  fileroot: "../../data/"
-  filename: "ns_random_64x64_T50"
+navier_stokes:
+  dataset:
+    fileroot: "../../data/"
+    filename: "ns_floating_sim_2d-seed1.h5"
 
-training_params:
-  learning_rate: 0.0001
-  learning_rate_final: 0.1
-  n_epochs: 20
-  batch_size: 8
-  patience: 20
+  training_params:
+    learning_rate: 0.0001
+    learning_rate_final: 0.1
+    n_epochs: 40
+    batch_size: 8
 
-diffuser:
-  n_diffusion_steps: 600
-  betas: [0.0001, 0.02]
-  
-eps_model:
-  in_channels: 5
-  out_channels: 3
-  emb_size: 128
-  layer_channels: [32, 64, 128, 256, 512]
-  n_groups: 8
-  
-recording_params:
-  eval_interval: 5
-  tb_writer_root: "./logs/"
-  model_save_root: "./checkpoint/"
+  diffuser:
+    n_diffusion_steps: 400
+    betas: [0.0001, 0.02]
+    
+  eps_model:
+    in_channels: 4
+    out_channels: 2
+    emb_size: 128
+    layer_channels: [32, 64, 128, 256, 512]
+    n_groups: 8
+    
+  recording_params:
+    eval_interval: 5
+    tb_writer_root: "./logs/"
+    model_save_root: "./checkpoint/"
+
+diffusion_reaction:
+  dataset:
+    fileroot: "../../data/"
+    filename: "2d_diffusion_reaction"
+    reduced_time_factor: 10
+    reduced_resolution_factor: 2
+
+  training_params:
+    learning_rate: 0.0001
+    learning_rate_final: 0.1
+    n_epochs: 20
+    batch_size: 8
+
+  diffuser:
+    n_diffusion_steps: 600
+    betas: [0.0001, 0.02]
+    
+  eps_model:
+    in_channels: 5
+    out_channels: 2
+    emb_size: 128
+    layer_channels: [32, 64, 128, 256, 512]
+    n_groups: 8
+    
+  recording_params:
+    eval_interval: 2
+    tb_writer_root: "./logs/"
+    model_save_root: "./checkpoint/"

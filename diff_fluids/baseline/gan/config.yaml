@@ -1,28 +1,27 @@
 # This file is to store the configuration for ddpm
 dataset:
   fileroot: "../../../data/"
-  filename: "ns_random_64x64_T50"
-  is_test: False
-  reduced_batch_factor: 1
-  reduced_time_factor: 1
-  reduced_resolution_factor: 1
+  filename: "ns_floating_sim_2d-seed1.h5"
 
 training_params:
-  learning_rate: 0.0001
+  G_learning_rate: 0.0005
+  D_learning_rate: 0.0001
   n_epochs: 30
   batch_size: 32
 
 model:
   generator:
-    in_channels: 3
-    out_channels: 3
-    init_features: 32
+    in_z_dims: 128
+    in_y_channels: 2
+    # in_channels: 2
+    out_channels: 2
+    init_features: 64
   discriminator:
-    in_channels: 5
-    init_features: 32
-    feature_mults: [1, 2, 4, 8]
+    in_x_channels: 2
+    in_y_channels: 2
+    # init_features: 32
   
 recording_params:
-  eval_interval: 5
+  eval_interval: 1
   tb_writer_root: "./logs/"
   model_save_root: "./checkpoint/"

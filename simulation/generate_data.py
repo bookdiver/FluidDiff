@@ -6,7 +6,7 @@ from omegaconf import OmegaConf
 from pytorch_lightning.cli import instantiate_class
 
 from nspointsmoke2d import generate_trajectories_pointsmoke
-from nsfullsmoke2d import generate_trajectories_fullsmoke
+from DiffFluids.simulation.incomp_ns_2d_sim import generate_trajectories_fullsmoke
 
 def main(cfg):
     os.makedirs(cfg.dirname, exist_ok=True)
