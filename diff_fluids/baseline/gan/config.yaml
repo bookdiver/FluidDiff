@@ -4,22 +4,22 @@ dataset:
   filename: "ns_floating_sim_2d-seed1.h5"
 
 training_params:
-  G_learning_rate: 0.0005
-  D_learning_rate: 0.0001
-  n_epochs: 30
+  G_learning_rate: 0.0002
+  D_learning_rate: 0.00002
+  n_epochs: 100
   batch_size: 32
+  lambda_GAN: 100
 
 model:
   generator:
-    in_z_dims: 128
-    in_y_channels: 2
-    # in_channels: 2
+    in_channels: 2
     out_channels: 2
     init_features: 64
+    activation: leaky_relu
   discriminator:
-    in_x_channels: 2
-    in_y_channels: 2
-    # init_features: 32
+    in_channels: 4
+    init_features: 64
+    activation: leaky_relu
   
 recording_params:
   eval_interval: 1
