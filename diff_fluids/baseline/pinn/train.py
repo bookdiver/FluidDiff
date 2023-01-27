@@ -41,7 +41,7 @@ class Trainer:
         self.l2_loss = torch.nn.MSELoss()
 
         dataset = NavierStokesPINNDataset(**configs['dataset'])
-        train_dataset, test_dataset = random_split(dataset, [int(0.75 * len(dataset)), len(dataset) - int(0.75 * len(dataset))])
+        train_dataset, test_dataset = random_split(dataset, [int(0.10 * len(dataset)), len(dataset) - int(0.10 * len(dataset))])
 
         self.n_epochs = configs['training_params']['n_epochs']
         self.lr = configs['training_params']['learning_rate']
