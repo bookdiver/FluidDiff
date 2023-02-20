@@ -1,6 +1,8 @@
 import h5py
 import torch
 from torch.utils.data import Dataset
+import glob
+import re
 
 class NavierStokesDataset(Dataset):
     def __init__(self, 
@@ -63,60 +65,35 @@ class NavierStokesDataset(Dataset):
         }
 
 
-class DiffusionReactionDataset(Dataset):
-    def __init__(self,
-                 fileroot: str,
-                 filename: str,
-                 is_test: bool=False,
-                 reduced_time_factor: int=10,
-                 reduced_resolution_factor: int=2):
-        with h5py.File(fileroot + filename + '.h5', 'r') as f:
-            xlen = len(f['0001']['grid']['x']) // reduced_resolution_factor 
-            ylen = len(f['0001']['grid']['y']) // reduced_resolution_factor 
-            tlen = (len(f['0001']['grid']['t']) - 1) // reduced_time_factor
-            t_max = f['0001']['grid']['t'][-1]
-            if not is_test:
-                n_sample_idxs = [i for i in range(0, 800)]
-            else:
-                n_sample_idxs = [i for i in range(800, 1000)]
-            sample_names = [str(i).zfill(4) for i in n_sample_idxs]
-
-            all_vars = []
-            all_ts = []
-            all_inits = []
-            for sample_name in sample_names:
-
-                # activator and inhibitor
-                _data = torch.from_numpy(f[sample_name]['data'][:]).float()  # [tlen, xlen, ylen, 2]
-                all_inits.append(_data[0, ::reduced_resolution_factor, ::reduced_resolution_factor, :].repeat(tlen, 1, 1, 1))
-                all_vars.append(_data[1::reduced_time_factor, ::reduced_resolution_factor, ::reduced_resolution_factor, :])
-
-                # time
-                t = torch.from_numpy(f[sample_name]['grid']['t'][1::reduced_time_factor]).float()
-                all_ts.append(t[:, None, None, None].repeat(1, xlen, ylen, 1))
-            
-            all_vars = torch.cat(all_vars, dim=0)
-            all_ts = torch.cat(all_ts, dim=0)
-            all_inits = torch.cat(all_inits, dim=0)
-
-            self.data = torch.cat([all_vars, all_inits, all_ts / t_max], dim=-1)
-        
+class KVSDataSet(Dataset):
+    def __init__(self, fileroot: str):
+        all_files = glob.glob(fileroot + '/*.h5')
+        RE_list, u_list, v_list, p_list = [], [], [], []
+        for file in all_files:
+            RE = float(re.findall(r'\d+', file)[-2])
+            RE_list.append(torch.tensor((RE, )))
+            with h5py.File(file, 'r') as f:
+                u_list.append(torch.from_numpy(f['velocity_x'][:]).float())
+                v_list.append(torch.from_numpy(f['velocity_y'][:]).float())
+                p_list.append(torch.from_numpy(f['pressure'][:]).float())
+        self.Re = torch.stack(RE_list, dim=0)
+        self.data = torch.stack([torch.cat(u_list, dim=0), torch.cat(v_list, dim=0), torch.cat(p_list, dim=0)], dim=1)
+    
     def __len__(self):
-        return len(self.data)
+        return len(self.Re)
     
     def __getitem__(self, idx):
-        data = self.data[idx]
         return {
-            'x': data[..., 0:2].permute(2, 0, 1),
-            'y': data[..., 2:5].permute(2, 0, 1)
+            'x': self.data[idx],
+            'y': self.Re[idx]
         }
 
 def _test():
-    dataset = DiffusionReactionDataset("/media/bamf-big/gefan/DiffFluids/data/", "2d_diffusion_reaction", is_test=True)
-    print(len(dataset))
+    dataset = KVSDataSet(fileroot='/media/bamf-big/gefan/FluidDiff/data/karman_vortex')
     print(dataset[0]['x'].shape)
     print(dataset[0]['y'].shape)
 
+    
 if __name__ == '__main__':
     _test()
 
