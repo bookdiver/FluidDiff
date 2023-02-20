@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 def normalization(channels: int, normalization_type: str='group') -> nn.Module:
     if normalization_type == 'batch':
-        return nn.BatchNorm2d(num_features=channels)
+        return nn.BatchNorm3d(num_features=channels)
     elif normalization_type == 'group':
         return nn.GroupNorm(num_groups=32, num_channels=channels)
     else:
@@ -26,13 +26,13 @@ class ResnetBlock(nn.Module):
         super().__init__()
         # First normalization and convolution layer
         self.norm1 = normalization(in_channels)
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 3, stride=1, padding=1)
+        self.conv1 = nn.Conv3d(in_channels, out_channels, kernel_size=3, stride=1, padding=1)
         # Second normalization and convolution layer
         self.norm2 = normalization(out_channels)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1)
+        self.conv2 = nn.Conv3d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         # `in_channels` to `out_channels` mapping layer for residual connection
         if in_channels != out_channels:
-            self.nin_shortcut = nn.Conv2d(in_channels, out_channels, 1, stride=1, padding=0)
+            self.nin_shortcut = nn.Conv3d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
         else:
             self.nin_shortcut = nn.Identity()
 
@@ -66,7 +66,7 @@ class UpSample(nn.Module):
         """
         super().__init__()
         # $3 \times 3$ convolution mapping
-        self.conv = nn.Conv2d(channels, channels, 3, padding=1)
+        self.conv = nn.Conv3d(channels, channels, 3, padding=1)
 
     def forward(self, x: torch.Tensor):
         """
@@ -88,71 +88,15 @@ class DownSample(nn.Module):
         """
         super().__init__()
         # $3 \times 3$ convolution with stride length of $2$ to down-sample by a factor of $2$
-        self.conv = nn.Conv2d(channels, channels, 3, stride=2, padding=0)
+        self.conv = nn.Conv3d(channels, channels, 3, stride=2, padding=1)
 
     def forward(self, x: torch.Tensor):
         """
         :param x: is the input feature map with shape `[batch_size, channels, height, width]`
         """
-        # Add padding
-        x = F.pad(x, (0, 1, 0, 1), mode="constant", value=0)
         # Apply convolution
         return self.conv(x)
     
-class AttnBlock(nn.Module):
-    """
-    ## Attention block
-    """
-
-    def __init__(self, channels: int):
-        """
-        :param channels: is the number of channels
-        """
-        super().__init__()
-        # Group normalization
-        self.norm = normalization(channels)
-        # Query, key and value mappings
-        self.q = nn.Conv2d(channels, channels, 1)
-        self.k = nn.Conv2d(channels, channels, 1)
-        self.v = nn.Conv2d(channels, channels, 1)
-        # Final $1 \times 1$ convolution layer
-        self.proj_out = nn.Conv2d(channels, channels, 1)
-        # Attention scaling factor
-        self.scale = channels ** -0.5
-
-    def forward(self, x: torch.Tensor):
-        """
-        :param x: is the tensor of shape `[batch_size, channels, height, width]`
-        """
-        # Normalize `x`
-        x_norm = self.norm(x)
-        # Get query, key and vector embeddings
-        q = self.q(x_norm)
-        k = self.k(x_norm)
-        v = self.v(x_norm)
-
-        # Reshape to query, key and vector embeedings from
-        # `[batch_size, channels, height, width]` to
-        # `[batch_size, channels, height * width]`
-        b, c, h, w = q.shape
-        q = q.view(b, c, h * w)
-        k = k.view(b, c, h * w)
-        v = v.view(b, c, h * w)
-
-        # Compute $\underset{seq}{softmax}\Bigg(\frac{Q K^\top}{\sqrt{d_{key}}}\Bigg)$
-        attn = torch.einsum('bci,bcj->bij', q, k) * self.scale
-        attn = F.softmax(attn, dim=2)
-
-        # Compute $\underset{seq}{softmax}\Bigg(\frac{Q K^\top}{\sqrt{d_{key}}}\Bigg)V$
-        out = torch.einsum('bij,bcj->bci', attn, v)
-
-        # Reshape back to `[batch_size, channels, height, width]`
-        out = out.view(b, c, h, w)
-        # Final $1 \times 1$ convolution layer
-        out = self.proj_out(out)
-
-        # Add residual connection
-        return x + out
 
 class GaussianLatent:
     """
@@ -197,7 +141,7 @@ class Encoder(nn.Module):
         n_resolutions = len(channel_multipliers)
 
         # Initial $3 \times 3$ convolution layer that maps the image to `channels`
-        self.conv_in = nn.Conv2d(in_channels, channels, 3, stride=1, padding=1)
+        self.conv_in = nn.Conv3d(in_channels, channels, 3, stride=1, padding=1)
 
         # Number of channels in each top level block
         channels_list = [m * channels for m in [1] + channel_multipliers]
@@ -226,12 +170,11 @@ class Encoder(nn.Module):
         # Final ResNet blocks with attention
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(channels, channels)
-        self.mid.attn_1 = AttnBlock(channels)
         self.mid.block_2 = ResnetBlock(channels, channels)
 
         # Map to embedding space with a $3 \times 3$ convolution
         self.norm_out = normalization(channels)
-        self.conv_out = nn.Conv2d(channels, 2 * z_channels, 3, stride=1, padding=1)
+        self.conv_out = nn.Conv3d(channels, 2 * z_channels, 3, stride=1, padding=1)
 
     def forward(self, img: torch.Tensor):
         """
@@ -251,7 +194,6 @@ class Encoder(nn.Module):
 
         # Final ResNet blocks with attention
         x = self.mid.block_1(x)
-        x = self.mid.attn_1(x)
         x = self.mid.block_2(x)
 
         # Normalize and map to embedding space
@@ -290,12 +232,11 @@ class Decoder(nn.Module):
         channels = channels_list[-1]
 
         # Initial $3 \times 3$ convolution layer that maps the embedding space to `channels`
-        self.conv_in = nn.Conv2d(z_channels, channels, 3, stride=1, padding=1)
+        self.conv_in = nn.Conv3d(z_channels, channels, 3, stride=1, padding=1)
 
         # ResNet blocks with attention
         self.mid = nn.Module()
         self.mid.block_1 = ResnetBlock(channels, channels)
-        self.mid.attn_1 = AttnBlock(channels)
         self.mid.block_2 = ResnetBlock(channels, channels)
 
         # List of top-level blocks
@@ -321,7 +262,7 @@ class Decoder(nn.Module):
 
         # Map to image space with a $3 \times 3$ convolution
         self.norm_out = normalization(channels)
-        self.conv_out = nn.Conv2d(channels, out_channels, 3, stride=1, padding=1)
+        self.conv_out = nn.Conv3d(channels, out_channels, 3, stride=1, padding=1)
 
     def forward(self, z: torch.Tensor):
         """
@@ -333,7 +274,6 @@ class Decoder(nn.Module):
 
         # ResNet blocks with attention
         h = self.mid.block_1(h)
-        h = self.mid.attn_1(h)
         h = self.mid.block_2(h)
 
         # Top-level blocks
@@ -362,9 +302,9 @@ class Autoencoder(nn.Module):
                  in_channels: int,
                  out_channels: Optional[int] = None,
                  n_res_blocks: int = 2,
-                 channel_multipliers: List[int] = [1, 2, 4, 8],
+                 channel_multipliers: List[int] = [1, 2, 4],
                  emb_channels: int=32, 
-                 z_channels: int=32):
+                 z_channels: int=4):
         super().__init__()
         self.encoder = Encoder(channels=32, 
                                channel_multipliers=channel_multipliers, 
@@ -378,10 +318,10 @@ class Autoencoder(nn.Module):
                                z_channels=z_channels)
         # Convolution to map from embedding space to
         # quantized embedding space moments (mean and log variance)
-        self.quant_conv = nn.Conv2d(2 * z_channels, 2 * emb_channels, 1)
+        self.quant_conv = nn.Conv3d(2 * z_channels, 2 * emb_channels, 1)
         # Convolution to map from quantized embedding space back to
         # embedding space
-        self.post_quant_conv = nn.Conv2d(emb_channels, z_channels, 1)
+        self.post_quant_conv = nn.Conv3d(emb_channels, z_channels, 1)
 
     def encode(self, img: torch.Tensor) -> 'GaussianLatent':
         """
@@ -418,8 +358,8 @@ class Autoencoder(nn.Module):
         return {'x': x, 'x_hat': x_hat, 'z': z}  
 
 def _test_vae():
-    vae = Autoencoder(in_channels=1, out_channels=1, n_res_blocks=2, emb_channels=32, z_channels=32)
-    x = torch.randn(2, 1, 32, 32)
+    vae = Autoencoder(in_channels=3, out_channels=3, n_res_blocks=2, emb_channels=4, z_channels=32)
+    x = torch.randn(2, 3, 16, 64, 64)
     out = vae(x)
     print("original input shape:", out['x'].shape)
     print("reconstruction output shape:", out['x_hat'].shape)
