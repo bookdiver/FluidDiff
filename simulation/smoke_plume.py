@@ -14,8 +14,8 @@ source_x_range = np.arange(2.0, 14.0+0.25, 0.25)
 source_y_range = np.arange(2.0, 14.0+0.25, 0.25)
 xx, yy = np.meshgrid(source_x_range, source_y_range)
 points = [[x, y] for x, y in zip(xx.flatten(), yy.flatten())]
-n_scenes = 500
-n_chunk = 10
+n_scenes = 1500
+n_chunk = 3
 n_scenes_per_chunk = n_scenes // n_chunk
 
 np.random.seed(215)
@@ -24,11 +24,11 @@ points = [points[i] for i in selected_scenes]
 chunked_points = [points[i:i+n_scenes_per_chunk] for i in range(0, len(points), n_scenes_per_chunk)]
 
 DOMAIN = Box(x=16, y=16)
-dt = 0.2
+dt = 0.1
 total_time = 40.0
 n_steps = int(total_time / dt)
 
-DATA_ROOT = '../data/smoke_plume_64x64/'
+DATA_ROOT = '../data/smoke_plume_64x64_N1500/'
 
 os.makedirs(DATA_ROOT, exist_ok=True)
 
