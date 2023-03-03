@@ -18,13 +18,13 @@ n_scenes = 1500
 n_chunk = 3
 n_scenes_per_chunk = n_scenes // n_chunk
 
-np.random.seed(215)
+np.random.seed(227)
 selected_scenes = np.random.choice(len(points), n_scenes, replace=False)
 points = [points[i] for i in selected_scenes]
 chunked_points = [points[i:i+n_scenes_per_chunk] for i in range(0, len(points), n_scenes_per_chunk)]
 
 DOMAIN = Box(x=16, y=16)
-dt = 0.1
+dt = 0.2
 total_time = 40.0
 n_steps = int(total_time / dt)
 
