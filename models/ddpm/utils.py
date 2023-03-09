@@ -102,15 +102,14 @@ class SmokePlumeDataset(Dataset):
             self.statistic_dict[phi] = {}
 
         for i, file in enumerate(all_files):
-            # each file contains 200 frames in 40.0s (5fps)
             with h5py.File(file, 'r') as data_store:
-                data_dict['source'].append(torch.from_numpy(data_store['source'][::read_every_frames]))
+                data_dict['source'].append(torch.from_numpy(data_store['source']))
                 for phi in physics_variables:
-                    data_dict[phi].append(torch.from_numpy(data_store[phi][::read_every_frames]))
+                    data_dict[phi].append(torch.from_numpy(data_store[phi][::read_every_frames]).permute(1, 0, 2, 3))
             print(f"Loaded {file} ({i+1}/{len(all_files)})")
         
         for phi in physics_variables:
-            data_dict[phi] = torch.cat(data_dict[phi], dim=1)
+            data_dict[phi] = torch.cat(data_dict[phi], dim=0)
             if normalize_type == 'pm1':
                 self.statistic_dict[phi]['min'] = data_dict[phi].min()
                 self.statistic_dict[phi]['max'] = data_dict[phi].max()
@@ -131,9 +130,10 @@ class SmokePlumeDataset(Dataset):
             else:
                 raise NotImplementedError
 
-        self.condition = torch.stack([data_dict['source']], dim=0).float()
+        self.condition = torch.cat([data_dict['source']], dim=0).unsqueeze(1).float() # (N, 1, H, W)
+
         self.data = torch.stack([data_dict[phi] for phi in physics_variables], dim=0).float()
-        self.data = self.data.permute(2, 0, 1, 3, 4)
+        self.data = self.data.permute(1, 0, 2, 3, 4) # (N, C, T, H, W)
 
         print(f"Loaded {len(self.data)} samples, data shape: {self.data.shape}")
     
