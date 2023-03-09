@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim import Adam, lr_scheduler
+from einops import rearrange
 
 from utils import SmokePlumeDataset
 from diffuser import GaussianDiffusion
@@ -101,13 +102,93 @@ class Trainer:
             pin_memory=True
         )
 
-        self.encoder = Autoencoder(
+        self.autoencoder = Autoencoder(
             in_channels = len(args.train_physics_variables),
             z_channels=1,
             use_variational=True,
             activation_type='relu'
         )
-        self.encoder.load_state_dict(
+        self.autoencoder.load_state_dict(
             torch.load(f'../vae/checkpoint/smoke_plume64x64/VAE_2D{args.train_physics_variables[0]}/model_checkpoint.pt')['model_state_dict']
         )
+        self.autoencoder.to(self.device)
         print('Load pretrained encoder successfully!')
+
+        self.eps_model = Unet3D(
+            dim=32,
+            cond_dim=256,
+            dim_mults=(1, 2, 4, 4)
+        )
+
+        self.diffuser = GaussianDiffusion(
+            eps_model=self.eps_model,
+            domain_size=(16, 16),
+            n_frames=40,
+            n_channels=1,
+            n_diffusion_steps=1000
+        )
+        self.diffuser.to(self.device)
+
+        self.optimizer = Adam(
+            self.diffuser.eps_model.parameters(),
+            lr=args.lr)
+        lf = lambda x: ((1 + math.cos(x*math.pi/args.epochs)) / 2) * (1 - args.lrf) + args.lrf
+        self.scheduler = lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
+        
+        print("Trainer initialized")
+
+    def train(self, args: argparse.Namespace):
+        for epoch in range(args.epochs):
+            self.diffuser.eps_model.train()
+            pbar_train = tqdm(self.train_loader)
+            for i, data in enumerate(pbar_train):
+                x = data['x'].to(self.device)
+                with torch.no_grad():
+                    b, c, t, h, w = x.shape
+                    x = rearrange(x, 'b c t h w -> (b t) c h w')
+                    x = self.autoencoder.encode(x).sample()
+                    x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
+                y = data['y'].to(self.device)
+                loss = self.diffuser(x, cond=y)
+                self.optimizer.zero_grad()
+                loss.backward()
+                self.optimizer.step()
+                pbar_train.set_description(f'Epoch {epoch}/{args.epochs}, Loss: {loss.item():.4f}')
+                if self.tb_writer is not None:
+                    self.tb_writer.add_scalar('train/loss', loss.item(), epoch*len(self.train_loader)+i)
+            self.scheduler.step()
+
+            self.diffuser.eps_model.eval()
+            pbar_test = tqdm(self.test_loader)
+            with torch.no_grad():
+                for i, data in enumerate(pbar_test):
+                    x = data['x'].to(self.device)
+                    b, c, t, h, w = x.shape
+                    x = rearrange(x, 'b c t h w -> (b t) c h w')
+                    x = self.autoencoder.encode(x).sample()
+                    x = rearrange(x, '(b t) c h w -> b c t h w', t=t)
+                    y = data['y'].to(self.device)
+                    loss = self.diffuser(x, cond=y)
+                    pbar_test.set_description(f'Epoch {epoch}/{args.epochs}, Loss: {loss.item():.4f}')
+                    if self.tb_writer is not None:
+                        self.tb_writer.add_scalar('test/loss', loss.item(), epoch*len(self.test_loader)+i)
+            
+            if not args.debug:
+                save_checkpoint(
+                    model = self.diffuser.eps_model.state_dict(),
+                    optimizer = self.optimizer.state_dict(),
+                    scheduler = self.scheduler.state_dict(),
+                    epoch = epoch,
+                    path=f'./checkpoints/smoke_plume64x64/{self.experiment_name}/model_checkpoint.pt'
+                )
+            
+        if self.tb_writer is not None:
+            self.tb_writer.close()
+        print('Training finished!')
+
+if __name__ == '__main__':
+    args = parse.parse_args()
+    trainer = Trainer(args=args)
+    trainer.train(args)
+
+

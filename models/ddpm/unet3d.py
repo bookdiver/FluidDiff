@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from functools import partial
 
 from einops import rearrange
-from einops_exts import rearrange_many
 
 from rotary_embedding_torch import RotaryEmbedding
 
@@ -254,7 +253,7 @@ class SpatialLinearAttention(nn.Module):
         x = rearrange(x, 'b c f h w -> (b f) c h w')
 
         qkv = self.to_qkv(x).chunk(3, dim = 1)
-        q, k, v = rearrange_many(qkv, 'b (h c) x y -> b h c (x y)', h = self.heads)
+        q, k, v = map(lambda z: rearrange(z, 'b (h c) x y -> b h c (x y)', h = self.heads), qkv)
 
         q = q.softmax(dim = -2)
         k = k.softmax(dim = -1)
@@ -337,7 +336,7 @@ class Attention(nn.Module):
 
         # split out heads
 
-        q, k, v = rearrange_many(qkv, '... n (h d) -> ... h n d', h = self.heads)
+        q, k, v = map(lambda z: rearrange(z, '... n (h d) -> ... h n d', h = self.heads), qkv)
 
         # scale
 
@@ -381,6 +380,32 @@ class Attention(nn.Module):
         out = rearrange(out, '... h n d -> ... n (h d)')
         return self.to_out(out)
 
+class ConditionEncoder(nn.Module):
+    def __init__(
+            self,
+            emb_dim: int,
+            cond_channels: int,
+            cond_dim: int
+    ):
+        super().__init__()
+        self.layers = nn.Sequential(
+            nn.Conv2d(cond_channels, cond_channels*2, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Conv2d(cond_channels*2, cond_channels*4, kernel_size=3, padding=1),
+            nn.SiLU(),
+            nn.MaxPool2d(kernel_size=2),
+            nn.Flatten(),
+            nn.Linear(cond_channels*4 * (cond_dim//4) * (cond_dim//4), emb_dim),
+            nn.SiLU(),
+            nn.Linear(emb_dim, emb_dim),
+            nn.SiLU()
+        )
+    
+    def forward(
+            self, 
+            cond: torch.Tensor):
+        return self.layers(cond)
 # model
 
 class Unet3D(nn.Module):
@@ -440,11 +465,11 @@ class Unet3D(nn.Module):
 
         self.null_cond_emb = nn.Parameter(torch.randn(1, cond_dim)) if self.has_cond else None
 
-        self.cond_mlp = nn.Sequential(
-            nn.Linear(1, cond_dim),
-            nn.GELU(),
-            nn.Linear(cond_dim, cond_dim)
-        ) if self.has_cond else None
+        self.cond_encoder = ConditionEncoder(
+            emb_dim=cond_dim,
+            cond_channels=1,
+            cond_dim=64
+        )
 
         cond_dim = time_dim + int(cond_dim or 0)
 
@@ -542,7 +567,7 @@ class Unet3D(nn.Module):
         if self.has_cond:
             batch, device = x.shape[0], x.device
             mask = prob_mask_like((batch,), null_cond_prob, device = device)
-            cond = self.cond_mlp(cond)
+            cond = self.cond_encoder(cond)
             cond = torch.where(rearrange(mask, 'b -> b 1'), self.null_cond_emb, cond)
             t = torch.cat((t, cond), dim = -1)
 
@@ -575,9 +600,9 @@ class Unet3D(nn.Module):
 def test():
     model = Unet3D(dim=32, cond_dim=64, dim_mults=(1, 2, 4, 8))
     print(f"the number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    videos = torch.randn(2, 3, 10, 128, 64)
+    videos = torch.randn(2, 3, 32, 16, 16)
     time = torch.randn(2)
-    cond = torch.randn(2, 64)
+    cond = torch.randn(2, 1, 64, 64)
     logits = model(videos, time, cond)
     print(logits.shape)
 

@@ -131,6 +131,7 @@ class SmokePlumeDataset(Dataset):
                 raise NotImplementedError
 
         self.condition = torch.cat([data_dict['source']], dim=0).unsqueeze(1).float() # (N, 1, H, W)
+        self.condition = self.condition / self.condition.max()
 
         self.data = torch.stack([data_dict[phi] for phi in physics_variables], dim=0).float()
         self.data = self.data.permute(1, 0, 2, 3, 4) # (N, C, T, H, W)

@@ -4,8 +4,6 @@ from torch import nn
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from einops_exts import check_shape
-
 def exists(x):
     return x is not None
 
@@ -228,7 +226,7 @@ class GaussianDiffusion(nn.Module):
     
     def forward(self, x0: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         b, device, domain_size = x0.shape[0], x0.device, self.domain_size
-        check_shape(x0, 'b c f h w', c=self.n_channels, f=self.n_frames, h=domain_size[0], w=domain_size[1])
+        # check_shape(x0, 'b c f h w', c=self.n_channels, f=self.n_frames, h=domain_size[0], w=domain_size[1])
         t = torch.randint(0, self.n_steps, (b, ), device=device).long()
         return self.p_losses(x0, t, *args, **kwargs)
 
@@ -280,16 +278,17 @@ def test():
     eps_model = Unet3D(dim=32, cond_dim=64, dim_mults=(1, 2, 4, 8))
     diffuser = GaussianDiffusion(
         eps_model=eps_model,
-        domain_size=(32, 32),
+        domain_size=(16, 16),
         n_frames=16,
         n_channels=3,
         n_diffusion_steps=100,
     )
-    # videos = torch.randn(2, 3, 16, 32, 32)
-    cond = torch.randn(2, 64)
-    # loss = diffuser(videos, cond=cond)
-    sample = diffuser.ddpm_sample(cond=cond)
-    print(sample.shape)
+    videos = torch.randn(2, 3, 16, 16, 16)
+    cond = torch.randn(2, 1, 64, 64)
+    loss = diffuser(videos, cond=cond)
+    print(loss)
+    # sample = diffuser.ddpm_sample(cond=cond)
+    # print(sample.shape)
 
 if __name__ == '__main__':
     test()
