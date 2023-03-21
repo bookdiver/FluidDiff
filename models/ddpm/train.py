@@ -1,159 +1,198 @@
+import copy
+import os
+import sys
+sys.path.append('..')
 import argparse
-import logging
 import math
+from tqdm import tqdm 
 
-import yaml
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm
+from torch.optim import Adam, lr_scheduler
+
+from data import NaiverStokes_Dataset
+from diffuser import GaussianDiffusion
+from unet import Unet3D, EMA
+
 import matplotlib
 import matplotlib.pyplot as plt
 
-from utils import NavierStokesDataset, DiffusionReactionDataset
-from net import UNet4Diffusion
-from denoising_diffusion import DenoisingDiffusion
-
 matplotlib.use('Agg')
 
-parse = argparse.ArgumentParser(description='Denoising Diffusion Training')
+parse = argparse.ArgumentParser(description='3D Denoising Diffusion Training')
 
-parse.add_argument('--device', type=int, default=0, help='device to use (default 0)')
-parse.add_argument('--debug', action='store_true', help='debug mode, default False')
-parse.add_argument('--experiment', type=str, choices=['navier_stokes', 'diffusion_reaction'], default='navier_stokes', help='experiment to run, default "navier_stokes"')
-parse.add_argument('--savename', type=str, default='default', help='name of the experiment, default "default"')
+parse.add_argument('--device-no', type=int, default=0, help='device to use (default 0)')
+parse.add_argument('--ema-decay', type=float, default=0.995, help='ema decay rate, default 0.995')
+parse.add_argument('--epoch-start-ema', type=int, default=2, help='epoch to start ema, default 2')
+parse.add_argument('--train-batch-size', type=int, default=4, help='batch size for training, default 4')
+parse.add_argument('--test-batch-size', type=int, default=1, help='batch size for testing, default 1')
+parse.add_argument('--train-lr', type=float, default=1e-4, help='learning rate for training, default 1e-4')
+parse.add_argument('--train-lrf', type=float, default=0.1, help='learning rate factor for training, default 0.1')
+parse.add_argument('--train-epochs', type=int, default=100, help='number of epochs for training, default 100')
+parse.add_argument('--resume-training', action='store_true', help='resume training')
+
+def save_config(
+        args: argparse.Namespace, 
+        path: str):
+    argsDict = args.__dict__
+    with open(path+'/config.txt', 'w') as f:
+        f.writelines('---------------------- Config ----------------------' + '\n')
+        for key, value in argsDict.items():
+            f.writelines(key + ' : ' + str(value) + '\n')
+        f.writelines('----------------------------------------------------' + '\n')
+
+def set_random_seed(
+        seed: int,
+        deterministic: bool = False,
+        benchmark: bool = False):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    if deterministic:
+        torch.backends.cudnn.deterministic = True
+    if benchmark:
+        torch.backends.cudnn.benchmark = True
 
 class Trainer:
-    def __init__(self, 
-                *, 
-                args: dict, 
-                configs: dict) -> None:
+    def __init__(
+            self,
+            diffusion_model: GaussianDiffusion,
+            *,
+            device_no: int,
+            ema_decay: float=0.995,
+            epoch_start_ema: int=2,
+            train_batch_size: int=4,
+            test_batch_size: int=1,
+            train_lr: float=1e-4,
+            train_lrf: float=0.1,
+            train_epochs: int=100,
+            resume_training: bool=False
+            ):
+        
+        self.device = torch.device('cuda', device_no)
+        self.diffusion_model = diffusion_model
+        self.ema = EMA(ema_decay)
+        self.ema_model = copy.deepcopy(self.diffusion_model)
+        self.epoch_start_ema = epoch_start_ema
 
-        self.device = args.device
-        self.debug = args.debug
-        self.savename = args.savename
+        self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-5_T20')
 
-        if args.experiment == 'navier_stokes':
-            self.configs = configs['navier_stokes']
-        elif args.experiment == 'diffusion_reaction':
-            self.configs = configs['diffusion_reaction']
+        self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_V1e-5_T20_train.h5')
+        self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_V1e-5_T20_test.h5')
 
-        self.eval_interval = self.configs['recording_params']['eval_interval']
-        self.tb_writer_root = self.configs['recording_params']['tb_writer_root']
-        self.model_save_root = self.configs['recording_params']['model_save_root']
+        self.train_dl = DataLoader(self.train_ds, batch_size=train_batch_size, shuffle=True, num_workers=4)
+        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=False, num_workers=4)
 
-        if self.debug:
-            logging.basicConfig(level=logging.DEBUG, format='%(levelname)s:%(asctime)s:%(message)s')
-        else:
-            logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(asctime)s:%(message)s')
-            self.tb_writer = SummaryWriter(log_dir=self.tb_writer_root + self.savename +'/')
+        self.optimizer = Adam(self.diffusion_model.denoising_fn.parameters(), lr=train_lr)
+        lf = lambda x: ((1 + math.cos(x*math.pi/train_epochs)) / 2) * (1 - train_lrf) + train_lrf
+        self.scheduler = lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
 
-        eps_model = UNet4Diffusion(**self.configs['eps_model'])
+        self.train_epochs = train_epochs
+        self.epoch = 0
+        if resume_training:
+            self.load_checkpoint()
+        
+        self.reset_parameters()
 
-        self.diffuser = DenoisingDiffusion(
-            eps_model=eps_model,
-            **self.configs['diffuser']
-        ).to(self.device)
-
-        if args.experiment == 'navier_stokes':
-            train_dataset = NavierStokesDataset(**self.configs['dataset'], is_test=False)
-            test_dataset = NavierStokesDataset(**self.configs['dataset'], is_test=True)
-        elif args.experiment == 'diffusion_reaction':
-            train_dataset = DiffusionReactionDataset(**self.configs['dataset'], is_test=False)
-            test_dataset = DiffusionReactionDataset(**self.configs['dataset'], is_test=True)
-
-        self.n_epochs = self.configs['training_params']['n_epochs']
-        self.lr = self.configs['training_params']['learning_rate']
-        self.lrf = self.configs['training_params']['learning_rate_final']
-        self.batch_size = self.configs['training_params']['batch_size']
-
-        self.train_dl = DataLoader(train_dataset, 
-                                    batch_size=self.batch_size, 
-                                    shuffle=True, 
-                                    num_workers=8, 
-                                    pin_memory=False)
-        self.test_dl = DataLoader(test_dataset,
-                                    batch_size=self.batch_size,
-                                    shuffle=True,
-                                    num_workers=8,
-                                    pin_memory=False)
-
-        self.optimizer = torch.optim.Adam(self.diffuser.eps_model.parameters(), lr=self.lr)
-        lf = lambda x: ((1 + math.cos(x * math.pi / self.n_epochs)) / 2) * (1 - self.lrf) + self.lrf
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lf)
-
-        logging.info("Trainer initialized")
+        print("Trainer initialized")
     
+    def reset_parameters(self):
+        self.ema_model.denoising_fn.load_state_dict(self.diffusion_model.denoising_fn.state_dict())
+    
+    def step_ema(self):
+        if self.epoch < self.epoch_start_ema:
+            self.reset_parameters()
+            return
+        self.ema.update_model_average(self.ema_model.denoising_fn, self.diffusion_model.denoising_fn)
+    
+    def save_checkpoint(self):
+        torch.save({
+            'epoch': self.epoch,
+            'model_state_dict': self.diffusion_model.denoising_fn.state_dict(),
+            'ema_model_state_dict': self.ema_model.denoising_fn.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            }, './ckpts/ns_V1e-5_T20/ckpt.pt')
+        print("Checkpoint saved")
+    
+    def load_checkpoint(self):
+        checkpoint = torch.load('./ckpts/ns_V1e-5_T20/ckpt.pt')
+        self.diffusion_model.denoising_fn.load_state_dict(checkpoint['model_state_dict'])
+        self.ema_model.denoising_fn.load_state_dict(checkpoint['ema_model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.epoch = checkpoint['epoch']
+        print("Training resumed")
+
     def train(self):
-        epoch_len = len(str(self.n_epochs))
+        for epoch in range(self.train_epochs):
 
-        for epoch in range(1, 1 + self.n_epochs):
-
-            # Training
-            self.diffuser.eps_model.train()
+            self.diffusion_model.denoising_fn.train()
             pbar_train = tqdm(self.train_dl)
+            cum_train_loss = 0
             for i, data in enumerate(pbar_train):
                 x = data['x'].to(self.device)
                 y = data['y'].to(self.device)
-                loss = self.diffuser.ddpm_loss(x, y)
-                train_loss = loss.item()
+                loss = self.diffusion_model(x, cond=y)
+                cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                pbar_train.set_description(f"[{epoch:>{epoch_len}}/{self.n_epochs:>{epoch_len}}] | " +
-                                           f"Train Loss: {train_loss:.5f}")
-                if hasattr(self, 'tb_writer'):
-                    self.tb_writer.add_scalar('Training loss', train_loss, (epoch-1) * len(self.train_dl) + i)
+                pbar_train.set_description(f'Train Epoch {epoch}/{self.train_epochs}, Avg Loss: {cum_train_loss / (i+1):.4f}')
+                self.tb_writer.add_scalar('train/loss', loss.item(), epoch*len(self.train_dl)+i)
+
             self.scheduler.step()
+            self.step_ema()
 
-            # Validation
-            self.diffuser.eps_model.eval()
-            cum_val_loss = 0
-            pbar_val = tqdm(self.test_dl)
-            for i, data in enumerate(pbar_val):
-                x = data['x'].to(self.device)
-                y = data['y'].to(self.device)
-                loss = self.diffuser.ddpm_loss(x, y)
-                cum_val_loss += loss.item()
-                pbar_val.set_description(f"[{epoch:>{epoch_len}}/{self.n_epochs:>{epoch_len}}] | " +
-                                         f"Avg val loss: {cum_val_loss / (i+1):.5f}")
-            
-            # Testing
-            if epoch % self.eval_interval == 0 or epoch == self.n_epochs:
-                logging.info(f"Evaluating at epoch {epoch}, starting sampling...")
-                with torch.no_grad():
-                    sample = next(iter(self.test_dl))
-                    x0 = sample['x'][:4]
-                    y = sample['y'][:4].to(self.device)
-                    seed = torch.randn(*x0.shape, device=self.device)
-                    x_pred = self.diffuser.sample(seed, y)
-                fig, ax = plt.subplots(4, 4, figsize=(12, 12))
-                x_pred = x_pred.detach().cpu().numpy()
-                for i in range(4):
-                    ax[0, i].imshow(x0[i, 0], origin='lower')
-                    ax[0, i].axis('off')
-                    ax[1, i].imshow(x_pred[i, 0], origin='lower')
-                    ax[1, i].axis('off')
-                    ax[2, i].imshow(x0[i, 1], origin='lower')
-                    ax[2, i].axis('off')
-                    ax[3, i].imshow(x_pred[i, 1], origin='lower')
-                    ax[3, i].axis('off')
-                if hasattr(self, 'tb_writer'):
+            self.diffusion_model.denoising_fn.eval()
+            pbar_test = tqdm(self.test_dl)
+            with torch.no_grad():
+                cum_val_loss = 0
+                for i, data in enumerate(pbar_test):
+                    x = data['x'].to(self.device)
+                    y = data['y'].to(self.device)
+                    loss = self.diffusion_model(x, cond=y)
+                    cum_val_loss += loss.item()
+                    pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
+                    self.tb_writer.add_scalar('test/loss', loss.item(), epoch*len(self.test_dl)+i)
+                
+                if epoch % 5 == 0:
+                    print(f"Sampling at epoch {epoch}")
+                    x_pred = self.diffusion_model.sample(cond=y)
+                    x_pred = x_pred.cpu().numpy().squeeze()
+                    fig, ax = plt.subplots(4, 5, figsize=(20, 16))
+                    ax = ax.flatten()
+                    for i in range(20):
+                        ax[i].imshow(x_pred[i], cmap='jet')
+                        ax[i].axis('off')
                     self.tb_writer.add_figure("Sampling on Test set", fig, epoch)
-                plt.close(fig)
-            if not self.debug:
-                torch.save(self.diffuser.eps_model.state_dict(), self.model_save_root + f'{self.savename}.pth')
 
-        logging.info('Training finished')
+            self.save_checkpoint()
+            self.epoch += 1
+            
         self.tb_writer.close()
-                        
+        print('Training finished!')
+
 if __name__ == '__main__':
     args = parse.parse_args()
-    with open("config.yaml", "r") as file:
-        configs = yaml.load(file, Loader=yaml.FullLoader)
-    trainer = Trainer(args=args, configs=configs)
+    os.makedirs(f'./ckpts/ns_V1e-5_T20', exist_ok=True)
+    save_config(args, f'./ckpts/ns_V1e-5_T20')
+
+    denoising_fn = Unet3D(
+        channels=1,
+        cond_channels=1,
+        channel_mults=(1, 2, 4, 8),
+        init_conv_channels=32,
+        init_conv_kernel_size=5
+    )
+    diffusion_model = GaussianDiffusion(
+        denoising_fn=denoising_fn,
+        sample_size=(1, 20, 64, 64),
+        n_diffusion_steps=1000
+    )
+    diffusion_model = diffusion_model.to(args.device_no)
+    trainer = Trainer(diffusion_model=diffusion_model, **vars(args))
+    set_random_seed(seed=1234, benchmark=False)
     trainer.train()
-
-
 
 
