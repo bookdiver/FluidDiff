@@ -549,7 +549,7 @@ cython_debug/
 # ignore some files
 data
 logs
-checkpoint
+ckpts
 assets
 
 # PyCharm
