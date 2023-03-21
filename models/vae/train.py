@@ -65,7 +65,7 @@ def main(args):
         fileroot='/media/bamf-big/gefan/FluidDiff/data/smoke_plume_64x64', 
         physics_variables=args.physics_variables,
         read_frames=args.train_video,
-        read_every_frames=2,
+        read_every_frames=5,
         normalize_type=args.normalization_type)
 
     save_config(args, f'./checkpoint/smoke_plume64x64/{args.experiment_name}')

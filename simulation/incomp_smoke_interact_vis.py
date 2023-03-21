@@ -1,9 +1,6 @@
 from phi.flow import *
 
 res = vis.control(7, (6, 8))
-source_x = vis.control(12, (2, 14))
-source_y = vis.control(2, (2, 14))
-source_radius = vis.control(1.0, (0.5, 1.5))
 pressure_solver = vis.control('auto', ('auto', 'CG', 'CG-adaptive', 'CG-native', 'direct', 'GMres', 'lGMres', 'biCG', 'CGS', 'QMR', 'GCrotMK'))
 
 BOUNDS = Box(x=16, y=16)

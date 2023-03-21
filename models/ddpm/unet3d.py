@@ -4,7 +4,7 @@ from torch import nn, einsum
 import torch.nn.functional as F
 from functools import partial
 
-from einops import rearrange
+from einops import rearrange, repeat
 
 from rotary_embedding_torch import RotaryEmbedding
 
@@ -154,11 +154,32 @@ class SinusoidalPosEmb(nn.Module):
         emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         return emb
 
-def Upsample(dim):
-    return nn.ConvTranspose3d(dim, dim, kernel_size=(1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1))
+class Upsample(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels,
+                              in_channels,
+                              kernel_size=(1, 3, 3),
+                              stride=(1, 1, 1),
+                              padding=(0, 1, 1),
+                              padding_mode='circular')
+    def forward(self, x):
+        x = F.interpolate(x, scale_factor=(1, 2, 2), mode='nearest')
+        x = self.conv(x)
+        return x
 
-def Downsample(dim):
-    return nn.Conv3d(dim, dim, kernel_size=(1, 4, 4), stride=(1, 2, 2), padding=(0, 1, 1))
+class Downsample(nn.Module):
+    def __init__(self, in_channels):
+        super().__init__()
+        self.conv = nn.Conv3d(in_channels,
+                              in_channels,
+                              kernel_size=(1, 3, 3),
+                              stride=(1, 2, 2),
+                              padding=(0, 0, 0))
+    def forward(self, x):
+        x = F.pad(x, pad=(0, 1, 0, 1, 0, 0), mode='circular')
+        x = self.conv(x)
+        return x
 
 class LayerNorm(nn.Module):
     def __init__(self, dim, eps = 1e-5):
@@ -301,38 +322,30 @@ class Attention(nn.Module):
     """
     def __init__(
         self,
-        channel_dim: int,
+        channels: int,
         heads: int=4,
-        dim_head: int=32,
+        channels_per_head: int=32,
         rotary_emb: RotaryEmbedding=None
     ):
         super().__init__()
-        self.scale = dim_head ** -0.5
+        self.scale = channels_per_head ** -0.5
         self.heads = heads
-        hidden_dim = dim_head * heads
+        hidden_channels = channels_per_head * heads
 
         self.rotary_emb = rotary_emb
-        self.to_qkv = nn.Linear(channel_dim, hidden_dim * 3, bias = False)
-        self.to_out = nn.Linear(hidden_dim, channel_dim, bias = False)
+        self.to_qkv = nn.Linear(channels, hidden_channels * 3, bias = False)
+        self.to_out = nn.Linear(hidden_channels, channels, bias = False)
 
     def forward(
         self,
         x: torch.Tensor,
         pos_bias = None,
-        focus_present_mask = None
     ):
         # x input size: (b, (h*w), f, c) for temporal attention
         #               (b, f, (h*w), c) for spatial attention
         n, device = x.shape[-2], x.device
 
         qkv = self.to_qkv(x).chunk(3, dim = -1)
-
-        if exists(focus_present_mask) and focus_present_mask.all():
-            # if all batch samples are focusing on present
-            # it would be equivalent to passing that token's values through to the output
-            # which means no temporal attention is done, the values are directly passed through
-            values = qkv[-1]
-            return self.to_out(values)
 
         # split out heads
 
@@ -357,18 +370,6 @@ class Attention(nn.Module):
         if exists(pos_bias):
             sim = sim + pos_bias
 
-        if exists(focus_present_mask) and not (~focus_present_mask).all():
-            attend_all_mask = torch.ones((n, n), device = device, dtype = torch.bool)
-            attend_self_mask = torch.eye(n, device = device, dtype = torch.bool)
-
-            mask = torch.where(
-                rearrange(focus_present_mask, 'b -> b 1 1 1 1'),
-                rearrange(attend_self_mask, 'i j -> 1 1 1 i j'),
-                rearrange(attend_all_mask, 'i j -> 1 1 1 i j'),
-            )
-
-            sim = sim.masked_fill(~mask, -torch.finfo(sim.dtype).max)
-
         # numerical stability
 
         sim = sim - sim.amax(dim = -1, keepdim = True).detach()
@@ -380,46 +381,19 @@ class Attention(nn.Module):
         out = rearrange(out, '... h n d -> ... n (h d)')
         return self.to_out(out)
 
-class ConditionEncoder(nn.Module):
-    def __init__(
-            self,
-            emb_dim: int,
-            cond_channels: int,
-            cond_dim: int
-    ):
-        super().__init__()
-        self.layers = nn.Sequential(
-            nn.Conv2d(cond_channels, cond_channels*2, kernel_size=3, padding=1),
-            nn.SiLU(),
-            nn.MaxPool2d(kernel_size=2),
-            nn.Conv2d(cond_channels*2, cond_channels*4, kernel_size=3, padding=1),
-            nn.SiLU(),
-            nn.MaxPool2d(kernel_size=2),
-            nn.Flatten(),
-            nn.Linear(cond_channels*4 * (cond_dim//4) * (cond_dim//4), emb_dim),
-            nn.SiLU(),
-            nn.Linear(emb_dim, emb_dim),
-            nn.SiLU()
-        )
-    
-    def forward(
-            self, 
-            cond: torch.Tensor):
-        return self.layers(cond)
 # model
 
 class Unet3D(nn.Module):
     def __init__(
         self,
-        dim: int,
-        cond_dim: int=None,
-        out_dim: int=None,
-        dim_mults: tuple=(1, 2, 4, 8),
-        channels: int=3,
+        channels: int,
+        cond_channels: int=None,
+        out_channels: int=None,
+        channel_mults: tuple=(1, 2, 4, 8),
         attn_heads: int=8,
-        attn_dim_head: int=32,
-        init_dim: int=None,
-        init_kernel_size: int=7,
+        attn_channels_per_head: int=32,
+        init_conv_channels: int=None,
+        init_conv_kernel_size: int=5,
         use_sparse_linear_attn: bool=True,
         resnet_groups: int=8
     ):
@@ -428,131 +402,107 @@ class Unet3D(nn.Module):
 
         # temporal attention and its relative positional encoding
 
-        rotary_emb = RotaryEmbedding(min(32, attn_dim_head))
+        rotary_emb = RotaryEmbedding(min(32, attn_channels_per_head))
 
-        temporal_attn = lambda dim: EinopsToAndFrom('b c f h w', 'b (h w) f c', Attention(dim, heads = attn_heads, dim_head = attn_dim_head, rotary_emb = rotary_emb))
+        temporal_attn = lambda dimension: EinopsToAndFrom('b c f h w', 'b (h w) f c', Attention(dimension, heads = attn_heads, channels_per_head = attn_channels_per_head, rotary_emb = rotary_emb))
 
         self.time_rel_pos_bias = RelativePositionBias(heads = attn_heads, max_distance = 32) # realistically will not be able to generate that many frames of video... yet
 
         # initial conv
 
-        init_dim = default(init_dim, dim)
-        assert is_odd(init_kernel_size)
+        init_conv_channels = default(init_conv_channels, channels)
+        assert is_odd(init_conv_kernel_size)
 
-        init_padding = init_kernel_size // 2
-        self.init_conv = nn.Conv3d(channels, init_dim, kernel_size=(1, init_kernel_size, init_kernel_size), padding = (0, init_padding, init_padding))
+        init_padding = init_conv_kernel_size // 2
+        self.init_conv = nn.Conv3d(channels, init_conv_channels, kernel_size=(1, init_conv_kernel_size, init_conv_kernel_size), padding = (0, init_padding, init_padding))
 
-        self.init_temporal_attn = Residual(PreNorm(init_dim, temporal_attn(init_dim)))
+        self.init_temporal_attn = Residual(PreNorm(init_conv_channels, temporal_attn(init_conv_channels)))
 
         # dimensions
 
-        dims = [init_dim, *map(lambda m: dim * m, dim_mults)]
-        in_out = list(zip(dims[:-1], dims[1:]))
+        channels_list = [2*init_conv_channels, *map(lambda m: 2*init_conv_channels * m, channel_mults)]
+        in_out_channels = list(zip(channels_list[:-1], channels_list[1:]))
 
         # time conditioning
 
-        time_dim = dim * 4
+        time_dim = init_conv_channels * 4
         self.time_mlp = nn.Sequential(
-            SinusoidalPosEmb(dim),
-            nn.Linear(dim, time_dim),
+            SinusoidalPosEmb(init_conv_channels*2),
+            nn.Linear(init_conv_channels*2, time_dim),
             nn.GELU(),
             nn.Linear(time_dim, time_dim)
         )
 
         # text conditioning
 
-        self.has_cond = exists(cond_dim) 
-
-        self.null_cond_emb = nn.Parameter(torch.randn(1, cond_dim)) if self.has_cond else None
-
-        self.cond_encoder = ConditionEncoder(
-            emb_dim=cond_dim,
-            cond_channels=1,
-            cond_dim=64
+        self.cond_conv = nn.Sequential(
+            nn.Conv2d(cond_channels, init_conv_channels, kernel_size=1, stride=1, padding=0),
+            nn.GELU(),
+            nn.Conv2d(init_conv_channels, init_conv_channels, kernel_size=init_conv_kernel_size, stride=1, padding=init_padding)
         )
-
-        cond_dim = time_dim + int(cond_dim or 0)
 
         # layers
 
         self.downs = nn.ModuleList([])
         self.ups = nn.ModuleList([])
 
-        num_resolutions = len(in_out)
+        num_resolutions = len(in_out_channels)
 
         # block type
 
         block_klass = partial(ResnetBlock, groups = resnet_groups)
-        block_klass_cond = partial(block_klass, time_emb_dim = cond_dim)
+        block_klass_cond = partial(block_klass, time_emb_dim = time_dim)
 
         # modules for all layers
 
-        for ind, (dim_in, dim_out) in enumerate(in_out):
+        for ind, (channels_in, channels_out) in enumerate(in_out_channels):
             is_last = ind >= (num_resolutions - 1)
 
             self.downs.append(nn.ModuleList([
-                block_klass_cond(dim_in, dim_out),
-                block_klass_cond(dim_out, dim_out),
-                Residual(PreNorm(dim_out, SpatialLinearAttention(dim_out, heads = attn_heads))) if use_sparse_linear_attn else nn.Identity(),
-                Residual(PreNorm(dim_out, temporal_attn(dim_out))),
-                Downsample(dim_out) if not is_last else nn.Identity()
+                block_klass_cond(channels_in, channels_out),
+                block_klass_cond(channels_out, channels_out),
+                Residual(PreNorm(channels_out, SpatialLinearAttention(channels_out, heads = attn_heads))) if use_sparse_linear_attn else nn.Identity(),
+                Residual(PreNorm(channels_out, temporal_attn(channels_out))),
+                Downsample(channels_out) if not is_last else nn.Identity()
             ]))
 
-        mid_dim = dims[-1]
-        self.mid_block1 = block_klass_cond(mid_dim, mid_dim)
+        mid_channels = channels_list[-1]
+        self.mid_block1 = block_klass_cond(mid_channels, mid_channels)
 
-        spatial_attn = EinopsToAndFrom('b c f h w', 'b f (h w) c', Attention(mid_dim, heads = attn_heads))
+        spatial_attn = EinopsToAndFrom('b c f h w', 'b f (h w) c', Attention(mid_channels, heads = attn_heads))
 
-        self.mid_spatial_attn = Residual(PreNorm(mid_dim, spatial_attn))
-        self.mid_temporal_attn = Residual(PreNorm(mid_dim, temporal_attn(mid_dim)))
+        self.mid_spatial_attn = Residual(PreNorm(mid_channels, spatial_attn))
+        self.mid_temporal_attn = Residual(PreNorm(mid_channels, temporal_attn(mid_channels)))
 
-        self.mid_block2 = block_klass_cond(mid_dim, mid_dim)
+        self.mid_block2 = block_klass_cond(mid_channels, mid_channels)
 
-        for ind, (dim_in, dim_out) in enumerate(reversed(in_out)):
+        for ind, (channels_in, channels_out) in enumerate(reversed(in_out_channels)):
             is_last = ind >= (num_resolutions - 1)
 
             self.ups.append(nn.ModuleList([
-                block_klass_cond(dim_out * 2, dim_in),
-                block_klass_cond(dim_in, dim_in),
-                Residual(PreNorm(dim_in, SpatialLinearAttention(dim_in, heads = attn_heads))) if use_sparse_linear_attn else nn.Identity(),
-                Residual(PreNorm(dim_in, temporal_attn(dim_in))),
-                Upsample(dim_in) if not is_last else nn.Identity()
+                block_klass_cond(channels_out * 2, channels_in),
+                block_klass_cond(channels_in, channels_in),
+                Residual(PreNorm(channels_in, SpatialLinearAttention(channels_in, heads = attn_heads))) if use_sparse_linear_attn else nn.Identity(),
+                Residual(PreNorm(channels_in, temporal_attn(channels_in))),
+                Upsample(channels_in) if not is_last else nn.Identity()
             ]))
 
-        out_dim = default(out_dim, channels)
+        out_channels = default(out_channels, channels)
         self.final_conv = nn.Sequential(
-            block_klass(dim * 2, dim),
-            nn.Conv3d(dim, out_dim, 1)
+            block_klass(init_conv_channels * 3, init_conv_channels),
+            nn.Conv3d(init_conv_channels, out_channels, 1)
         )
-
-    def forward_with_cond_scale(
-        self,
-        *args,
-        cond_scale: float=2.0,
-        **kwargs
-    ):
-        logits = self.forward(*args, null_cond_prob = 0., **kwargs)
-        if cond_scale == 1 or not self.has_cond:
-            return logits
-
-        null_logits = self.forward(*args, null_cond_prob = 1., **kwargs)
-        return null_logits + (logits - null_logits) * cond_scale
 
     def forward(
         self,
         x,
         time,
-        cond = None,
-        null_cond_prob = 0.,
-        focus_present_mask = None,
-        prob_focus_present = 0.  # probability at which a given batch sample will focus on the present (0. is all off, 1. is completely arrested attention across time)
+        cond = None
     ):
-        assert not (self.has_cond and not exists(cond)), 'cond must be passed in if cond_dim specified'
-        batch, device = x.shape[0], x.device
+        b, c, f, h, w = x.shape
+        device = x.device
 
-        focus_present_mask = default(focus_present_mask, lambda: prob_mask_like((batch,), prob_focus_present, device = device))
-
-        time_rel_pos_bias = self.time_rel_pos_bias(x.shape[2], device = x.device)
+        time_rel_pos_bias = self.time_rel_pos_bias(f, device = x.device)
 
         x = self.init_conv(x)
 
@@ -564,12 +514,13 @@ class Unet3D(nn.Module):
 
         # classifier free guidance
 
-        if self.has_cond:
-            batch, device = x.shape[0], x.device
-            mask = prob_mask_like((batch,), null_cond_prob, device = device)
-            cond = self.cond_encoder(cond)
-            cond = torch.where(rearrange(mask, 'b -> b 1'), self.null_cond_emb, cond)
-            t = torch.cat((t, cond), dim = -1)
+        if cond is not None:
+            cond_emb = self.cond_conv(cond)
+            cond_emb = repeat(cond_emb, 'b c h w -> b c f h w', f = f)
+        else:
+            cond_emb = torch.zeros_like(x)
+
+        x = torch.cat((x, cond_emb), dim = 1)
 
         h = []
 
@@ -577,13 +528,13 @@ class Unet3D(nn.Module):
             x = block1(x, t)
             x = block2(x, t)
             x = spatial_attn(x)
-            x = temporal_attn(x, pos_bias = time_rel_pos_bias, focus_present_mask = focus_present_mask)
+            x = temporal_attn(x, pos_bias = time_rel_pos_bias)
             h.append(x)
             x = downsample(x)
 
         x = self.mid_block1(x, t)
         x = self.mid_spatial_attn(x)
-        x = self.mid_temporal_attn(x, pos_bias = time_rel_pos_bias, focus_present_mask = focus_present_mask)
+        x = self.mid_temporal_attn(x, pos_bias = time_rel_pos_bias)
         x = self.mid_block2(x, t)
 
         for block1, block2, spatial_attn, temporal_attn, upsample in self.ups:
@@ -591,16 +542,22 @@ class Unet3D(nn.Module):
             x = block1(x, t)
             x = block2(x, t)
             x = spatial_attn(x)
-            x = temporal_attn(x, pos_bias = time_rel_pos_bias, focus_present_mask = focus_present_mask)
+            x = temporal_attn(x, pos_bias = time_rel_pos_bias)
             x = upsample(x)
 
         x = torch.cat((x, r), dim = 1)
         return self.final_conv(x)
 
 def test():
-    model = Unet3D(dim=32, cond_dim=64, dim_mults=(1, 2, 4, 8))
+    model = Unet3D(channels=3,
+                   cond_channels=1,
+                   channel_mults=(1, 2, 4, 8, 8),
+                   init_conv_channels=32,
+                   init_conv_kernel_size=5
+    )
     print(f"the number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    videos = torch.randn(2, 3, 32, 16, 16)
+    # print(model)
+    videos = torch.randn(2, 3, 11, 64, 64)
     time = torch.randn(2)
     cond = torch.randn(2, 1, 64, 64)
     logits = model(videos, time, cond)
