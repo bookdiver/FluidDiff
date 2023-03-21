@@ -21,16 +21,16 @@ def extract(constant: torch.Tensor, t: torch.Tensor, x_shape: torch.Size) -> tor
 
     return out.reshape(bs, *((1, ) * (len(x_shape) - 1)))
 
-def linear_beta_schedule(n_diffusion_steps: int) -> torch.Tensor:
-    diffusion_step_scale = 1000 / n_diffusion_steps
+def linear_beta_schedule(timesteps: int) -> torch.Tensor:
+    diffusion_step_scale = 1000 / timesteps
     beta_start = diffusion_step_scale * 0.0001
     beta_end = diffusion_step_scale * 0.02
 
-    return torch.linspace(beta_start, beta_end, n_diffusion_steps, dtype=torch.float64)
+    return torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float64)
 
-def cosine_beta_schedule(n_diffusion_steps: int, s: float=0.008) -> torch.Tensor:
-    steps = n_diffusion_steps + 1
-    t = torch.linspace(0, n_diffusion_steps, steps, dtype=torch.float64) / n_diffusion_steps
+def cosine_beta_schedule(timesteps: int, s: float=0.008) -> torch.Tensor:
+    steps = timesteps + 1
+    t = torch.linspace(0, timesteps, steps, dtype=torch.float64) / timesteps
     alpha_bar = torch.cos((t+s) / (1+s) * math.pi * 0.5) **2
     alpha_bar = alpha_bar / alpha_bar[0]
     betas = 1 - (alpha_bar[1:] / alpha_bar[:-1])
@@ -41,21 +41,28 @@ class GaussianDiffusion(nn.Module):
                  denoising_fn: torch.nn.Module,
                  *,
                  sample_size: tuple,
-                 n_diffusion_steps: int=1000,
+                 timesteps: int=1000,
+                 sampling_timesteps: int=None,
                  beta_schedule_type: str='linear',
+                 ddim_sampling_eta: float=0.,
                  loss_type: str='L2'
                  ) -> None:
         super().__init__()
 
         self.denoising_fn = denoising_fn
         self.sample_size = sample_size
+        self.sampling_timesteps = default(sampling_timesteps, timesteps)
+
+        assert self.sampling_timesteps <= timesteps, 'sampling_timesteps must be less than or equal to timesteps'
+        self.is_ddim_sampling = self.sampling_timesteps < timesteps
+        self.ddim_sampling_eta = ddim_sampling_eta
         
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
 
         if beta_schedule_type == 'linear':
-            beta_t = linear_beta_schedule(n_diffusion_steps)
+            beta_t = linear_beta_schedule(timesteps)
         elif beta_schedule_type == 'cosine':
-            beta_t = cosine_beta_schedule(n_diffusion_steps)
+            beta_t = cosine_beta_schedule(timesteps)
         else:
             raise NotImplementedError(f'beta_schedule_type {beta_schedule_type} not implemented')
 
@@ -64,7 +71,7 @@ class GaussianDiffusion(nn.Module):
         alpha_bar_t_prev = F.pad(alpha_bar_t[:-1], (1, 0), value=1.0)
 
         time_steps, = beta_t.shape
-        self.num_time_steps = int(time_steps)
+        self.num_timesteps = int(time_steps)
         
         register_buffer('beta_t', beta_t)
         register_buffer('alpha_bar_t', alpha_bar_t)
@@ -103,6 +110,12 @@ class GaussianDiffusion(nn.Module):
 
         return xt_coeff * xt - eps_coeff * eps
     
+    def predict_xt_from_x0(self, xt: torch.Tensor, t: torch.LongTensor, x0_recon: torch.Tensor) -> torch.Tensor:
+        xt_coeff = extract(self.sqrt_recip_alpha_bar_t, t, xt.shape)
+        scale = 1 / extract(self.sqrt_recipm1_alpha_bar_t, t, xt.shape)
+
+        return (xt_coeff * xt - x0_recon) * scale
+    
     
     def get_q_posterior(self, x0: torch.Tensor, xt: torch.Tensor, t: torch.LongTensor) -> tuple:
         mean = extract(self.posterior_mean_coef1, t, x0.shape) * x0 + extract(self.posterior_mean_coef2, t, xt.shape) * xt
@@ -111,16 +124,16 @@ class GaussianDiffusion(nn.Module):
 
         return mean, variance, log_variance
 
-    def get_model_predictions(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, clip_denoising: bool=False) -> tuple:
+    def get_model_predictions(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, clip_x0_recon: bool=False, rederive_eps_theta: bool=False) -> tuple:
         eps_theta = self.denoising_fn(xt, t, cond=cond)
         x0_recon = self.predict_x0_from_xt(xt, t, eps=eps_theta)
 
-        if clip_denoising:
+        if clip_x0_recon:
             x0_recon = x0_recon.clamp(-1.0, 1.0)
 
-        # mean, variance, log_variance = self.get_q_xtm1_xt_mean_variance(x0=x0_recon, xt=xt, t=t)
+        if clip_x0_recon and rederive_eps_theta:
+            eps_theta = self.predict_xt_from_x0(xt, t, x0_recon)
 
-        # return mean, variance, log_variance
         return ModelPrediction(eps_theta=eps_theta, x0_recon=x0_recon)
 
     def get_p_mean_variance(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor):
@@ -132,24 +145,54 @@ class GaussianDiffusion(nn.Module):
     
     @torch.no_grad()
     def p_sample(self, xt: torch.Tensor, t: int, cond: torch.Tensor) -> torch.Tensor:
-        b, *_, device = *xt.shape, xt.device
-        batched_ts = torch.full((b, ), t, device=device, dtype=torch.long)
+        bs, device = xt.shape[0], xt.device
+        batched_ts = torch.full((bs, ), t, device=device, dtype=torch.long)
         mean_theta, _, log_variance_theta = self.get_p_mean_variance(xt=xt, t=batched_ts, cond=cond)
-        # mean_theta, log_variance_theta = mean_theta.to(device), log_variance_theta.to(device)
         eps = torch.randn_like(xt) if t > 0 else 0
 
         return mean_theta + (0.5 * log_variance_theta).exp() * eps
     
     @torch.no_grad()
     def p_sample_loop(self, shape: tuple, cond: torch.Tensor, device: torch.device) -> torch.Tensor:
-        bs, device = shape[0], self.beta_t.device
         xt = torch.randn(shape, device=device)
 
-        for i in tqdm(reversed(range(0, self.num_time_steps)), desc='DDPM sampling', total=self.num_time_steps):
-            xt = self.p_sample(xt=xt, t=i, cond=cond)
+        for t in tqdm(reversed(range(0, self.num_timesteps)), desc='DDPM sampling', total=self.num_timesteps):
+            xt = self.p_sample(xt=xt, t=t, cond=cond)
 
         return xt
-        
+    
+    @torch.no_grad()
+    def ddim_sample(self, xt: torch.Tensor, t: int, t_next: int, cond: torch.Tensor) -> torch.Tensor:
+        bs, device = xt.shape[0], xt.device
+        batched_ts = torch.full((bs, ), t, device=device, dtype=torch.long)
+        eps_theta, x0_recon = self.get_model_predictions(xt=xt, t=batched_ts, cond=cond, clip_x0_recon=True, rederive_eps_theta=True)
+
+        if t_next < 0:
+            return x0_recon
+
+        alpha_bar = self.alpha_bar_t[t]
+        alpha_bar_next = self.alpha_bar_t[t_next]
+
+        sigma = self.ddim_sampling_eta * ((1 - alpha_bar / alpha_bar_next) * (1 - alpha_bar_next) / (1 - alpha_bar)).sqrt()
+        c = (1 - alpha_bar_next - sigma ** 2).sqrt()
+
+        eps = torch.randn_like(xt)
+
+        return x0_recon*alpha_bar_next.sqrt() +  c*eps_theta + sigma*eps
+
+    @torch.no_grad()
+    def ddim_sample_loop(self, shape: tuple, cond: torch.Tensor, device: torch.device) -> torch.Tensor:
+        times = torch.linspace(-1, self.num_timesteps-1, steps=self.sampling_timesteps+1)
+        times = list(reversed(times.int().tolist()))
+        time_pairs = list(zip(times[:-1], times[1:]))
+
+        xt = torch.randn(shape, device=device)
+
+        for t, t_next in tqdm(time_pairs, desc='DDIM sampling', total=len(time_pairs)):
+            xt = self.ddim_sample(xt=xt, t=t, t_next=t_next, cond=cond)
+
+        return xt
+
     @torch.no_grad()
     def sample(self, cond: torch.Tensor=None) -> torch.Tensor:
         device = next(self.denoising_fn.parameters()).device
@@ -158,7 +201,9 @@ class GaussianDiffusion(nn.Module):
         b = cond.shape[0]
         shape = (b, *self.sample_size)
 
-        return self.p_sample_loop(shape=shape, cond=cond, device=device)
+        sampling_fn = self.ddim_sample_loop if self.is_ddim_sampling else self.p_sample_loop
+
+        return sampling_fn(shape=shape, cond=cond, device=device)
     
     def q_sample(self, x0: torch.Tensor, t: torch.LongTensor, eps: torch.Tensor=None) -> torch.Tensor:
         eps = default(eps, lambda: torch.randn_like(x0))
@@ -192,11 +237,11 @@ class GaussianDiffusion(nn.Module):
     
     def forward(self, x0: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         b, device = x0.shape[0], x0.device
-        t = torch.randint(0, self.num_time_steps, (b, ), device=device).long()
+        t = torch.randint(0, self.num_timesteps, (b, ), device=device).long()
         return self.p_losses(x0, t, *args, **kwargs)
 
 def test():
-    from unet3d import Unet3D
+    from unet import Unet3D
     eps_model = Unet3D(
         channels=1,
         cond_channels=1,
@@ -206,7 +251,8 @@ def test():
     diffuser = GaussianDiffusion(
         denoising_fn=eps_model,
         sample_size=(1, 20, 64, 64),
-        n_diffusion_steps=100,
+        timesteps=100,
+        sampling_timesteps=10,
     ).cuda()
     x = torch.randn(2, 1, 20, 64, 64).cuda()
     cond = torch.randn(2, 1, 64, 64).cuda()
