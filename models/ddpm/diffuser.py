@@ -4,6 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 from tqdm import tqdm
+from einops import repeat
 
 ModelPrediction = namedtuple('ModelPrediction', ['eps_theta', 'x0_recon'])
 
@@ -91,6 +92,29 @@ class GaussianDiffusion(nn.Module):
         register_buffer('posterior_mean_coef2', (1. - alpha_bar_t_prev) * torch.sqrt(alpha_t) / (1. - alpha_bar_t))
 
         self.loss_type = loss_type
+
+        nx, ny = sample_size[-2], sample_size[-1]
+        self.k_x_max, self.k_y_max = nx // 2, ny // 2
+                                          
+        k_x = torch.cat((torch.arange(start=0, end=self.k_x_max, step=1),
+                         torch.arange(start=-self.k_x_max, end=0, step=1)), dim=0)
+        k_x = repeat(k_x, 'h -> 1 1 1 h w', h=nx, w=nx)
+        k_y = torch.cat((torch.arange(start=0, end=self.k_y_max, step=1),
+                         torch.arange(start=-self.k_y_max, end=0, step=1)), dim=0)
+        k_y = repeat(k_y, 'w -> 1 1 1 h w', h=ny, w=ny)
+        register_buffer('k_x', k_x)
+        register_buffer('k_y', k_y)
+
+        laplacian_h = (self.k_x ** 2 + self.k_y ** 2)
+        laplacian_h[..., 0, 0] = 1.0
+        register_buffer('laplacian_h', laplacian_h)
+        register_buffer('nu', torch.tensor(1e-5))
+        register_buffer('dt', torch.tensor(1.0))
+
+        x = torch.linspace(0, 1, nx+1)[0:-1]
+        y = torch.linspace(0, 1, ny+1)[0:-1]
+        xx, yy = torch.meshgrid(x, y, indexing='ij')
+        register_buffer('f', 0.1 * (torch.sin(2*math.pi*(xx+yy)) + torch.cos(2*math.pi*(xx+yy))))
     
     def get_eps(self, xt: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         assert xt.device == t.device == y.device == self.betas.device, f'xt, t, y, and eps_model must be on the same device'
@@ -220,8 +244,31 @@ class GaussianDiffusion(nn.Module):
             return F.mse_loss
         else:
             raise NotImplementedError(f'Loss type {self.loss_type} not implemented')
+    
+    def get_ns_residual_loss(self, wt: torch.Tensor) -> torch.Tensor:
+        w_h = torch.fft.fft2(wt[:, :, 1:-1], dim=[3, 4])
+        psi_h = w_h / self.laplacian_h
 
-    def p_losses(self, x0: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, eps: torch.Tensor=None, **kwargs) -> torch.Tensor:
+        u_h = 1j * self.k_y * psi_h
+        v_h = -1j * self.k_x * psi_h
+        wx_h = 1j * self.k_x * w_h
+        wy_h = 1j * self.k_y * w_h
+        wlaplacian_h = -self.laplacian_h * w_h
+
+        u = torch.fft.irfft2(u_h[..., :, :self.k_x_max+1], dim=[3, 4])
+        v = torch.fft.irfft2(v_h[..., :, :self.k_y_max+1], dim=[3, 4])
+        wx = torch.fft.irfft2(wx_h[..., :, :self.k_x_max+1], dim=[3, 4])
+        wy = torch.fft.irfft2(wy_h[..., :, :self.k_y_max+1], dim=[3, 4])
+        wlaplacian = torch.fft.irfft2(wlaplacian_h[..., :, :self.k_x_max+1], dim=[3, 4])
+        advection = (u * wx + v * wy) * self.dt
+
+        w_t = (wt[:, :, 2:, :, :] - wt[:, :, :-2, :, :]) / (2 * self.dt)
+
+        residual = w_t + (advection - self.nu * wlaplacian) - self.f
+        loss = torch.mean(residual ** 2)
+        return loss
+
+    def p_losses(self, x0: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, eps: torch.Tensor=None, lamb: float=0.5) -> torch.Tensor:
         device = x0.device
         eps = default(eps, lambda: torch.randn_like(x0))
 
@@ -229,11 +276,13 @@ class GaussianDiffusion(nn.Module):
 
         cond = cond.to(device) if cond is not None else None
 
-        eps_theta = self.denoising_fn(xt, t, cond, **kwargs)
+        eps_theta = self.denoising_fn(xt, t, cond)
 
-        loss = self.loss_fn(eps_theta, eps)
+        denoising_loss = self.loss_fn(eps_theta, eps)
+        physics_loss = self.get_ns_residual_loss(wt=xt)
+        total_loss = denoising_loss + lamb * physics_loss
         
-        return loss
+        return total_loss, denoising_loss, lamb * physics_loss
     
     def forward(self, x0: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         b, device = x0.shape[0], x0.device
@@ -256,8 +305,8 @@ def test():
     ).cuda()
     x = torch.randn(2, 1, 20, 64, 64).cuda()
     cond = torch.randn(2, 1, 64, 64).cuda()
-    x = diffuser.sample(cond=cond)
-    print(x.shape)
+    loss = diffuser(x0=x, cond=cond, lamb=0.1)
+    print(loss)
     # sample = diffuser.ddpm_sample(cond=cond)
     # print(sample.shape)
 

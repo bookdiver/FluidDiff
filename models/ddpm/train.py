@@ -31,6 +31,7 @@ parse.add_argument('--train-lr', type=float, default=1e-4, help='learning rate f
 parse.add_argument('--train-lrf', type=float, default=0.1, help='learning rate factor for training, default 0.1')
 parse.add_argument('--train-epochs', type=int, default=100, help='number of epochs for training, default 100')
 parse.add_argument('--resume-training', action='store_true', help='resume training')
+parse.add_argument('--phyloss_weight', type=float, default=0.1, help='weight of physical loss, default 0.1')
 
 def save_config(
         args: argparse.Namespace, 
@@ -66,7 +67,8 @@ class Trainer:
             train_lr: float=1e-4,
             train_lrf: float=0.1,
             train_epochs: int=100,
-            resume_training: bool=False
+            resume_training: bool=False,
+            phyloss_weight: float=0.1
             ):
         
         self.device = torch.device('cuda', device_no)
@@ -74,8 +76,9 @@ class Trainer:
         self.ema = EMA(ema_decay)
         self.ema_model = copy.deepcopy(self.diffusion_model)
         self.epoch_start_ema = epoch_start_ema
+        self.phyloss_weight = phyloss_weight
 
-        self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-5_T20')
+        self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-5_T20_0.1phyloss')
 
         self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_V1e-5_T20_train.h5')
         self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_V1e-5_T20_test.h5')
@@ -112,11 +115,11 @@ class Trainer:
             'ema_model_state_dict': self.ema_model.denoising_fn.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            }, './ckpts/ns_V1e-5_T20/ckpt.pt')
+            }, './ckpts/ns_V1e-5_T20_0.1phyloss/ckpt.pt')
         print("Checkpoint saved")
     
     def load_checkpoint(self):
-        checkpoint = torch.load('./ckpts/ns_V1e-5_T20/ckpt.pt')
+        checkpoint = torch.load('./ckpts/ns_V1e-5_T20_0.1phyloss/ckpt.pt')
         self.diffusion_model.denoising_fn.load_state_dict(checkpoint['model_state_dict'])
         self.ema_model.denoising_fn.load_state_dict(checkpoint['ema_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -133,13 +136,15 @@ class Trainer:
             for i, data in enumerate(pbar_train):
                 x = data['x'].to(self.device)
                 y = data['y'].to(self.device)
-                loss = self.diffusion_model(x, cond=y)
+                loss, dn_loss, phy_loss = self.diffusion_model(x, cond=y, lamb=self.phyloss_weight)
                 cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
                 pbar_train.set_description(f'Train Epoch {epoch}/{self.train_epochs}, Avg Loss: {cum_train_loss / (i+1):.4f}')
                 self.tb_writer.add_scalar('train/loss', loss.item(), epoch*len(self.train_dl)+i)
+                self.tb_writer.add_scalar('train/dn_loss', dn_loss.item(), epoch*len(self.train_dl)+i)
+                self.tb_writer.add_scalar('train/phy_loss', phy_loss.item(), epoch*len(self.train_dl)+i)
 
             self.scheduler.step()
             self.step_ema()
@@ -151,7 +156,7 @@ class Trainer:
                 for i, data in enumerate(pbar_test):
                     x = data['x'].to(self.device)
                     y = data['y'].to(self.device)
-                    loss = self.diffusion_model(x, cond=y)
+                    loss, dn_loss, phy_loss = self.diffusion_model(x, cond=y, lamb=self.phyloss_weight)
                     cum_val_loss += loss.item()
                     pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
                     self.tb_writer.add_scalar('test/loss', loss.item(), epoch*len(self.test_dl)+i)
@@ -175,8 +180,8 @@ class Trainer:
 
 if __name__ == '__main__':
     args = parse.parse_args()
-    os.makedirs(f'./ckpts/ns_V1e-5_T20', exist_ok=True)
-    save_config(args, f'./ckpts/ns_V1e-5_T20')
+    os.makedirs(f'./ckpts/ns_V1e-5_T20_0.1phyloss', exist_ok=True)
+    save_config(args, f'./ckpts/ns_V1e-5_T20_0.1phyloss')
 
     denoising_fn = Unet3D(
         channels=1,
@@ -188,7 +193,7 @@ if __name__ == '__main__':
     diffusion_model = GaussianDiffusion(
         denoising_fn=denoising_fn,
         sample_size=(1, 20, 64, 64),
-        n_diffusion_steps=1000
+        timesteps=1000
     )
     diffusion_model = diffusion_model.to(args.device_no)
     trainer = Trainer(diffusion_model=diffusion_model, **vars(args))
