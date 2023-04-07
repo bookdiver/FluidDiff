@@ -1,4 +1,5 @@
 from collections import namedtuple
+from functools import partial
 import math
 import torch
 from torch import nn
@@ -6,7 +7,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from einops import repeat
 
-ModelPrediction = namedtuple('ModelPrediction', ['eps_theta', 'x0_recon'])
+ModelPrediction = namedtuple('ModelPrediction', ['eps_pred', 'x0_pred'])
 
 def exists(x):
     return x is not None
@@ -15,6 +16,9 @@ def default(val, d):
     if exists(val):
         return val
     return d() if callable(d) else d
+
+def identity(x, *args, **kwargs):
+    return x
 
 def extract(constant: torch.Tensor, t: torch.Tensor, x_shape: torch.Size) -> torch.Tensor:
     bs, *_ = t.shape
@@ -39,18 +43,26 @@ def cosine_beta_schedule(timesteps: int, s: float=0.008) -> torch.Tensor:
 
 class GaussianDiffusion(nn.Module):
     def __init__(self,
-                 denoising_fn: torch.nn.Module,
+                 model: torch.nn.Module,
                  *,
                  sample_size: tuple,
                  timesteps: int=1000,
                  sampling_timesteps: int=None,
                  beta_schedule_type: str='linear',
                  ddim_sampling_eta: float=0.,
-                 loss_type: str='L2'
+                 loss_type: str='L2',
+                 objective: str='pred_noise',
+                 min_snr_loss_weight: bool=False,
+                 min_snr_gamma: float=5.,
+                 physics_loss_weight: float=0.0,
                  ) -> None:
         super().__init__()
 
-        self.denoising_fn = denoising_fn
+        self.model = model
+        
+        assert objective in ['pred_noise', 'pred_x0'], 'objective must be either pred_noise or pred_x0'
+        self.objective = objective
+
         self.sample_size = sample_size
         self.sampling_timesteps = default(sampling_timesteps, timesteps)
 
@@ -91,35 +103,37 @@ class GaussianDiffusion(nn.Module):
         register_buffer('posterior_mean_coef1', beta_t * torch.sqrt(alpha_bar_t_prev) / (1. - alpha_bar_t))
         register_buffer('posterior_mean_coef2', (1. - alpha_bar_t_prev) * torch.sqrt(alpha_t) / (1. - alpha_bar_t))
 
+        snr = self.alpha_bar_t / (1 - self.alpha_bar_t)
+        maybe_clipped_snr = snr.clone()
+        if min_snr_loss_weight:
+            maybe_clipped_snr = maybe_clipped_snr.clamp(max=min_snr_gamma)
+        
+        if objective == 'pred_noise':
+            register_buffer('dn_loss_weight', maybe_clipped_snr / snr)
+        elif objective == 'pred_x0':
+            register_buffer('dn_loss_weight', maybe_clipped_snr)
+
         self.loss_type = loss_type
 
-        nx, ny = sample_size[-2], sample_size[-1]
-        self.k_x_max, self.k_y_max = nx // 2, ny // 2
-                                          
-        k_x = torch.cat((torch.arange(start=0, end=self.k_x_max, step=1),
-                         torch.arange(start=-self.k_x_max, end=0, step=1)), dim=0)
+        if physics_loss_weight > 0.:
+            for key, val in self.get_fourier_domian().items():
+                register_buffer(key, val)
+        self.physics_loss_weight = physics_loss_weight
+
+    def get_fourier_domian(self) -> dict:
+        nt, nx, ny = self.sample_size[-3:]
+        k_x = torch.fft.fftfreq(nx)
         k_x = repeat(k_x, 'h -> 1 1 1 h w', h=nx, w=nx)
-        k_y = torch.cat((torch.arange(start=0, end=self.k_y_max, step=1),
-                         torch.arange(start=-self.k_y_max, end=0, step=1)), dim=0)
+        k_y = torch.fft.fftfreq(ny)
         k_y = repeat(k_y, 'w -> 1 1 1 h w', h=ny, w=ny)
-        register_buffer('k_x', k_x)
-        register_buffer('k_y', k_y)
+        k_t = torch.fft.fftfreq(nt)
+        k_t = repeat(k_t, 't -> 1 1 t 1 1', t=nt)
 
-        laplacian_h = (self.k_x ** 2 + self.k_y ** 2)
+        laplacian_h = (k_x ** 2 + k_y ** 2)
         laplacian_h[..., 0, 0] = 1.0
-        register_buffer('laplacian_h', laplacian_h)
-        register_buffer('nu', torch.tensor(1e-5))
-        register_buffer('dt', torch.tensor(1.0))
 
-        x = torch.linspace(0, 1, nx+1)[0:-1]
-        y = torch.linspace(0, 1, ny+1)[0:-1]
-        xx, yy = torch.meshgrid(x, y, indexing='ij')
-        register_buffer('f', 0.1 * (torch.sin(2*math.pi*(xx+yy)) + torch.cos(2*math.pi*(xx+yy))))
-    
-    def get_eps(self, xt: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        assert xt.device == t.device == y.device == self.betas.device, f'xt, t, y, and eps_model must be on the same device'
+        return {'k_x': k_x, 'k_y': k_y, 'laplacian_h': laplacian_h, 'k_x_max': k_x_max, 'k_y_max': k_y_max}
 
-        return self.denoising_fn(xt, t, y)
     
     def get_q_xt_x0_mean_variance(self, x0: torch.Tensor, t: torch.Tensor) -> tuple:      
         mean = extract(self.sqrt_alpha_bar_t, t, x0.shape)
@@ -131,14 +145,16 @@ class GaussianDiffusion(nn.Module):
     def predict_x0_from_xt(self, xt: torch.Tensor, t: torch.LongTensor, eps: torch.Tensor) -> torch.Tensor:
         xt_coeff = extract(self.sqrt_recip_alpha_bar_t, t, xt.shape)
         eps_coeff = extract(self.sqrt_recipm1_alpha_bar_t, t, eps.shape)
+        x0_recon = xt_coeff * xt - eps_coeff * eps
 
-        return xt_coeff * xt - eps_coeff * eps
+        return x0_recon
     
-    def predict_xt_from_x0(self, xt: torch.Tensor, t: torch.LongTensor, x0_recon: torch.Tensor) -> torch.Tensor:
+    def predict_eps_from_x0(self, xt: torch.Tensor, t: torch.LongTensor, x0_recon: torch.Tensor) -> torch.Tensor:
         xt_coeff = extract(self.sqrt_recip_alpha_bar_t, t, xt.shape)
         scale = 1 / extract(self.sqrt_recipm1_alpha_bar_t, t, xt.shape)
+        eps_recon = (xt_coeff * xt - x0_recon) * scale
 
-        return (xt_coeff * xt - x0_recon) * scale
+        return eps_recon
     
     
     def get_q_posterior(self, x0: torch.Tensor, xt: torch.Tensor, t: torch.LongTensor) -> tuple:
@@ -148,51 +164,72 @@ class GaussianDiffusion(nn.Module):
 
         return mean, variance, log_variance
 
-    def get_model_predictions(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, clip_x0_recon: bool=False, rederive_eps_theta: bool=False) -> tuple:
-        eps_theta = self.denoising_fn(xt, t, cond=cond)
-        x0_recon = self.predict_x0_from_xt(xt, t, eps=eps_theta)
+    def get_model_predictions(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, clip_x0_pred: bool=False, rederive_eps_pred: bool=False) -> tuple:
+        model_output = self.model(xt, t, cond=cond)
+        maybe_clipped = partial(torch.clamp, min=-1.0, max=1.0) if clip_x0_pred else identity
 
-        if clip_x0_recon:
-            x0_recon = x0_recon.clamp(-1.0, 1.0)
+        if self.objective == 'pred_noise':
+            eps_pred = model_output
+            x0_pred = self.predict_x0_from_xt(xt, t, eps=eps_pred)
+            x0_pred = maybe_clipped(x0_pred)
 
-        if clip_x0_recon and rederive_eps_theta:
-            eps_theta = self.predict_xt_from_x0(xt, t, x0_recon)
+            if clip_x0_pred and rederive_eps_pred:
+                eps_pred = self.predict_eps_from_x0(xt, t, x0_pred)
+        
+        elif self.objective == 'pred_x0':
+            x0_pred = model_output
+            x0_pred = maybe_clipped(x0_pred)
+            eps_pred = self.predict_eps_from_x0(xt, t, x0_pred)
 
-        return ModelPrediction(eps_theta=eps_theta, x0_recon=x0_recon)
+        return ModelPrediction(eps_pred=eps_pred, x0_pred=x0_pred)
 
-    def get_p_mean_variance(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor):
+    def get_p_sample_mean_variance(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, clip_x0_pred: bool=True) -> tuple:
         preds = self.get_model_predictions(xt=xt, t=t, cond=cond)
-        x0 = preds.x0_recon
+        x0_pred = preds.x0_pred
 
-        mean_theta, posterior_variance, posterior_log_variance = self.get_q_posterior(x0=x0, xt=xt, t=t)
-        return mean_theta, posterior_variance, posterior_log_variance
+        if clip_x0_pred:
+            x0_pred = torch.clamp(x0_pred, min=-1.0, max=1.0)
+
+        posterior_mean, posterior_variance, posterior_log_variance = self.get_q_posterior(x0=x0_pred, xt=xt, t=t)
+        return posterior_mean, posterior_variance, posterior_log_variance, x0_pred
     
     @torch.no_grad()
-    def p_sample(self, xt: torch.Tensor, t: int, cond: torch.Tensor) -> torch.Tensor:
+    def p_sample(self, xt: torch.Tensor, t: int, cond: torch.Tensor) -> tuple:
         bs, device = xt.shape[0], xt.device
         batched_ts = torch.full((bs, ), t, device=device, dtype=torch.long)
-        mean_theta, _, log_variance_theta = self.get_p_mean_variance(xt=xt, t=batched_ts, cond=cond)
-        eps = torch.randn_like(xt) if t > 0 else 0
+        if self.objective == 'pred_noise':
+            posterior_mean, _, log_posterior_variance, x0_pred = self.get_p_sample_mean_variance(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=False)
+            eps = torch.randn_like(xt) if t > 0 else 0
+            x_tm1 = posterior_mean + (0.5 * log_posterior_variance).exp() * eps
+        elif self.objective == 'pred_x0':
+            _, _, _, x0_pred = self.get_p_sample_mean_variance(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=False)
+            batched_tm1s = torch.full((bs, ), t - 1, device=device, dtype=torch.long)
+            x_tm1 = self.q_sample(x0=x0_pred, t=batched_tm1s) if t>1 else x0_pred
 
-        return mean_theta + (0.5 * log_variance_theta).exp() * eps
+        return x_tm1, x0_pred
     
     @torch.no_grad()
-    def p_sample_loop(self, shape: tuple, cond: torch.Tensor, device: torch.device) -> torch.Tensor:
+    def p_sample_loop(self, shape: tuple, cond: torch.Tensor, device: torch.device, return_all_timesteps: bool=False) -> torch.Tensor:
         xt = torch.randn(shape, device=device)
+        
+        x0_preds = []
 
         for t in tqdm(reversed(range(0, self.num_timesteps)), desc='DDPM sampling', total=self.num_timesteps):
-            xt = self.p_sample(xt=xt, t=t, cond=cond)
+            xt, x0_pred = self.p_sample(xt=xt, t=t, cond=cond)
+            x0_preds.append(x0_pred)
 
-        return xt
+        result = torch.stack(x0_preds, dim=1) if return_all_timesteps else xt
+
+        return result
     
     @torch.no_grad()
     def ddim_sample(self, xt: torch.Tensor, t: int, t_next: int, cond: torch.Tensor) -> torch.Tensor:
         bs, device = xt.shape[0], xt.device
         batched_ts = torch.full((bs, ), t, device=device, dtype=torch.long)
-        eps_theta, x0_recon = self.get_model_predictions(xt=xt, t=batched_ts, cond=cond, clip_x0_recon=True, rederive_eps_theta=True)
+        eps_pred, x0_pred = self.get_model_predictions(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=True, rederive_eps_pred=True)
 
         if t_next < 0:
-            return x0_recon
+            return x0_pred
 
         alpha_bar = self.alpha_bar_t[t]
         alpha_bar_next = self.alpha_bar_t[t_next]
@@ -201,25 +238,31 @@ class GaussianDiffusion(nn.Module):
         c = (1 - alpha_bar_next - sigma ** 2).sqrt()
 
         eps = torch.randn_like(xt)
+        x_tm1 = x0_pred*alpha_bar.sqrt() + c*eps_pred + sigma*eps
 
-        return x0_recon*alpha_bar_next.sqrt() +  c*eps_theta + sigma*eps
+        return x_tm1, x0_pred
 
     @torch.no_grad()
-    def ddim_sample_loop(self, shape: tuple, cond: torch.Tensor, device: torch.device) -> torch.Tensor:
+    def ddim_sample_loop(self, shape: tuple, cond: torch.Tensor, device: torch.device, return_all_timesteps: bool=False) -> torch.Tensor:
         times = torch.linspace(-1, self.num_timesteps-1, steps=self.sampling_timesteps+1)
         times = list(reversed(times.int().tolist()))
         time_pairs = list(zip(times[:-1], times[1:]))
 
         xt = torch.randn(shape, device=device)
 
-        for t, t_next in tqdm(time_pairs, desc='DDIM sampling', total=len(time_pairs)):
-            xt = self.ddim_sample(xt=xt, t=t, t_next=t_next, cond=cond)
+        x0_preds = []
 
-        return xt
+        for t, t_next in tqdm(time_pairs, desc='DDIM sampling', total=len(time_pairs)):
+            xt, x0_pred = self.ddim_sample(xt=xt, t=t, t_next=t_next, cond=cond)
+            x0_preds.append(x0_pred)
+
+        result = torch.stack(x0_preds, dim=1) if return_all_timesteps else xt
+
+        return result
 
     @torch.no_grad()
     def sample(self, cond: torch.Tensor=None) -> torch.Tensor:
-        device = next(self.denoising_fn.parameters()).device
+        device = next(self.model.parameters()).device
 
         cond = cond.to(device)
         b = cond.shape[0]
@@ -268,21 +311,29 @@ class GaussianDiffusion(nn.Module):
         loss = torch.mean(residual ** 2)
         return loss
 
-    def p_losses(self, x0: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, eps: torch.Tensor=None, lamb: float=0.5) -> torch.Tensor:
+    def p_losses(self, x0: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, eps: torch.Tensor=None) -> torch.Tensor:
         device = x0.device
         eps = default(eps, lambda: torch.randn_like(x0))
+        sqrt_alpha_bar_t = self.sqrt_alpha_bar_t[t[0]]
 
         xt = self.q_sample(x0=x0, t=t, eps=eps)
 
         cond = cond.to(device) if cond is not None else None
 
-        eps_theta = self.denoising_fn(xt, t, cond)
+        if self.objective == 'pred_noise':
+            target = eps
+        elif self.objective == 'pred_x0':
+            target = x0
+        else:
+            raise NotImplementedError(f'Objective {self.objective} not implemented')
 
-        denoising_loss = self.loss_fn(eps_theta, eps)
-        physics_loss = self.get_ns_residual_loss(wt=xt)
-        total_loss = denoising_loss + lamb * physics_loss
+        model_output = self.model(xt, t, cond)
+
+        denoising_loss = self.loss_fn(model_output, target)
+        physics_loss = self.get_ns_residual_loss(wt=xt) if self.physics_loss_weight > 0. else 0.
+        total_loss = denoising_loss + self.physics_loss_weight * sqrt_alpha_bar_t * physics_loss
         
-        return total_loss, denoising_loss, lamb * physics_loss
+        return total_loss, denoising_loss, self.physics_loss_weight * sqrt_alpha_bar_t * physics_loss
     
     def forward(self, x0: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         b, device = x0.shape[0], x0.device
@@ -298,17 +349,17 @@ def test():
         init_conv_channels=32
     )
     diffuser = GaussianDiffusion(
-        denoising_fn=eps_model,
+        model=eps_model,
         sample_size=(1, 20, 64, 64),
-        timesteps=100,
-        sampling_timesteps=10,
+        timesteps=1000,
+        sampling_timesteps=100,
     ).cuda()
     x = torch.randn(2, 1, 20, 64, 64).cuda()
     cond = torch.randn(2, 1, 64, 64).cuda()
-    loss = diffuser(x0=x, cond=cond, lamb=0.1)
-    print(loss)
-    # sample = diffuser.ddpm_sample(cond=cond)
-    # print(sample.shape)
+    # loss = diffuser(x0=x, cond=cond, lamb=0.1)
+    # print(loss)
+    sample = diffuser.sample(cond=cond)
+    print(sample.shape)
 
 if __name__ == '__main__':
     test()
