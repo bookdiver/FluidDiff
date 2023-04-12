@@ -109,30 +109,11 @@ class GaussianDiffusion(nn.Module):
             maybe_clipped_snr = maybe_clipped_snr.clamp(max=min_snr_gamma)
         
         if objective == 'pred_noise':
-            register_buffer('dn_loss_weight', maybe_clipped_snr / snr)
+            register_buffer('loss_weight', maybe_clipped_snr / snr)
         elif objective == 'pred_x0':
-            register_buffer('dn_loss_weight', maybe_clipped_snr)
+            register_buffer('loss_weight', maybe_clipped_snr)
 
         self.loss_type = loss_type
-
-        if physics_loss_weight > 0.:
-            for key, val in self.get_fourier_domian().items():
-                register_buffer(key, val)
-        self.physics_loss_weight = physics_loss_weight
-
-    def get_fourier_domian(self) -> dict:
-        nt, nx, ny = self.sample_size[-3:]
-        k_x = torch.fft.fftfreq(nx)
-        k_x = repeat(k_x, 'h -> 1 1 1 h w', h=nx, w=nx)
-        k_y = torch.fft.fftfreq(ny)
-        k_y = repeat(k_y, 'w -> 1 1 1 h w', h=ny, w=ny)
-        k_t = torch.fft.fftfreq(nt)
-        k_t = repeat(k_t, 't -> 1 1 t 1 1', t=nt)
-
-        laplacian_h = (k_x ** 2 + k_y ** 2)
-        laplacian_h[..., 0, 0] = 1.0
-
-        return {'k_x': k_x, 'k_y': k_y, 'laplacian_h': laplacian_h, 'k_x_max': k_x_max, 'k_y_max': k_y_max}
 
     
     def get_q_xt_x0_mean_variance(self, x0: torch.Tensor, t: torch.Tensor) -> tuple:      
@@ -287,34 +268,10 @@ class GaussianDiffusion(nn.Module):
             return F.mse_loss
         else:
             raise NotImplementedError(f'Loss type {self.loss_type} not implemented')
-    
-    def get_ns_residual_loss(self, wt: torch.Tensor) -> torch.Tensor:
-        w_h = torch.fft.fft2(wt[:, :, 1:-1], dim=[3, 4])
-        psi_h = w_h / self.laplacian_h
-
-        u_h = 1j * self.k_y * psi_h
-        v_h = -1j * self.k_x * psi_h
-        wx_h = 1j * self.k_x * w_h
-        wy_h = 1j * self.k_y * w_h
-        wlaplacian_h = -self.laplacian_h * w_h
-
-        u = torch.fft.irfft2(u_h[..., :, :self.k_x_max+1], dim=[3, 4])
-        v = torch.fft.irfft2(v_h[..., :, :self.k_y_max+1], dim=[3, 4])
-        wx = torch.fft.irfft2(wx_h[..., :, :self.k_x_max+1], dim=[3, 4])
-        wy = torch.fft.irfft2(wy_h[..., :, :self.k_y_max+1], dim=[3, 4])
-        wlaplacian = torch.fft.irfft2(wlaplacian_h[..., :, :self.k_x_max+1], dim=[3, 4])
-        advection = (u * wx + v * wy) * self.dt
-
-        w_t = (wt[:, :, 2:, :, :] - wt[:, :, :-2, :, :]) / (2 * self.dt)
-
-        residual = w_t + (advection - self.nu * wlaplacian) - self.f
-        loss = torch.mean(residual ** 2)
-        return loss
 
     def p_losses(self, x0: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, eps: torch.Tensor=None) -> torch.Tensor:
         device = x0.device
         eps = default(eps, lambda: torch.randn_like(x0))
-        sqrt_alpha_bar_t = self.sqrt_alpha_bar_t[t[0]]
 
         xt = self.q_sample(x0=x0, t=t, eps=eps)
 
@@ -329,11 +286,9 @@ class GaussianDiffusion(nn.Module):
 
         model_output = self.model(xt, t, cond)
 
-        denoising_loss = self.loss_fn(model_output, target)
-        physics_loss = self.get_ns_residual_loss(wt=xt) if self.physics_loss_weight > 0. else 0.
-        total_loss = denoising_loss + self.physics_loss_weight * sqrt_alpha_bar_t * physics_loss
+        loss = self.loss_fn(model_output, target)
         
-        return total_loss, denoising_loss, self.physics_loss_weight * sqrt_alpha_bar_t * physics_loss
+        return model_output, loss
     
     def forward(self, x0: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         b, device = x0.shape[0], x0.device

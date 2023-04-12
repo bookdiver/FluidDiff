@@ -16,7 +16,7 @@ from tqdm import tqdm
 #T: final time
 #delta_t: internal time-step for solve (descrease if blow-up)
 #record_steps: number of in-time snapshots to record
-def navier_stokes_2d(w0, f, visc, T, delta_t=1e-4, record_steps=1, sub=1):
+def navier_stokes_2d(w0, f, visc, T, delta_t=1e-4, sampling_every=10, sub=1):
 
     #Grid size - must be power of 2
     N = w0.size()[-1]
@@ -37,9 +37,6 @@ def navier_stokes_2d(w0, f, visc, T, delta_t=1e-4, record_steps=1, sub=1):
     if len(f_h.size()) < len(w_h.size()):
         f_h = torch.unsqueeze(f_h, 0)
 
-    #Record solution every this number of steps
-    record_time = math.floor(steps/record_steps)
-
     #Wavenumbers in y-direction
     k_y = torch.cat((torch.arange(start=0, end=k_max, step=1, device=w0.device), torch.arange(start=-k_max, end=0, step=1, device=w0.device)), 0).repeat(N,1)
     #Wavenumbers in x-direction
@@ -56,15 +53,12 @@ def navier_stokes_2d(w0, f, visc, T, delta_t=1e-4, record_steps=1, sub=1):
     dealias = torch.unsqueeze(torch.logical_and(torch.abs(k_y) <= (2.0/3.0)*k_max, torch.abs(k_x) <= (2.0/3.0)*k_max).float(), 0)
 
     #Saving solution and time
-    sol_w = torch.zeros(w0.size(0), N//sub, N//sub, record_steps, device=w0.device)
-    sol_q = torch.zeros(w0.size(0), N//sub, N//sub, record_steps, device=w0.device)
-    sol_v = torch.zeros(w0.size(0), N//sub, N//sub, record_steps, device=w0.device)
+    sol_w = torch.zeros(w0.size(0), N//sub, N//sub, steps//sampling_every, device=w0.device)
 
     #Record counter
     c = 0
-    #Physical time
-    t = 0.0
-    for j in tqdm(range(steps)):
+    pbar = tqdm(range(steps), dynamic_ncols=True)
+    for j in pbar:
         #Stream function in Fourier space: solve Poisson equation
         psi_h = w_h / lap
 
@@ -93,19 +87,17 @@ def navier_stokes_2d(w0, f, visc, T, delta_t=1e-4, record_steps=1, sub=1):
         #Crank-Nicolson update
         w_h = (-delta_t*F_h + delta_t*(f_h+0.1*w_h) + (1.0 - 0.5*delta_t*visc*lap)*w_h)/(1.0 + 0.5*delta_t*visc*lap)
 
-
-        if (j+1) % record_time == 0:
+        if (j+1) % sampling_every == 0:
+        
             #Solution in physical space
             w = torch.fft.irfft2(w_h, s=(N, N))
 
             #Record solution and time
             sol_w[...,c] = w[:, ::sub, ::sub]
-            sol_q[...,c] = q[:, ::sub, ::sub]
-            sol_v[...,c] = v[:, ::sub, ::sub]
-
             c += 1
 
-    return sol_w, sol_q, sol_v
+    return sol_w
+
 
 
 device = torch.device('cuda')
@@ -115,7 +107,10 @@ s = 256
 sub = 4
 
 #Number of solutions to generate
-N = 20
+N = 200
+
+#Batch size
+bsize = 20
 
 #Set up 2d GRF with covariance parameters
 GRF = GaussianRF(2, s, alpha=2.5, tau=7, device=device)
@@ -129,19 +124,28 @@ f = 0.1*(torch.sin(2*math.pi*(X + Y)) + torch.cos(2*math.pi*(X + Y)))
 # f = -4.0 * torch.cos(4.0 * Y)
 
 #Number of snapshots from solution
-record_steps = 2000
+record_steps = 20
+
+sampling_every = 10
+
+# Total simulation time
+T = 20.0
+
+# Time step
+delta_t= 1e-4
+
+# viscosity
+visc = 1e-3
+
+total_steps = math.ceil(T/(delta_t*sampling_every))
+record_interval = math.ceil(total_steps/record_steps)
 
 #Inputs
 a = torch.zeros(N, s//sub, s//sub)
 #Solutions
-w = torch.zeros(N, s//sub, s//sub, record_steps)
-q = torch.zeros(N, s//sub, s//sub, record_steps)
-v = torch.zeros(N, s//sub, s//sub, record_steps)
-
-#Solve equations in batches (order of magnitude speed-up)
-
-#Batch size
-bsize = 20
+w_now = torch.zeros(N, s//sub, s//sub, record_steps)
+w_prev = torch.zeros(N, s//sub, s//sub, record_steps)
+w_next = torch.zeros(N, s//sub, s//sub, record_steps)
 
 c = 0
 t0 =default_timer()
@@ -151,12 +155,14 @@ for j in range(N//bsize):
     w0 = GRF.sample(bsize)
 
     #Solve NS
-    sol_w, sol_q, sol_v = navier_stokes_2d(w0, f, 1e-3, 20.0, 1e-4, record_steps, sub)
+    sol_w = navier_stokes_2d(w0, f, visc, T, delta_t, sampling_every, sub)
 
     a[c:(c+bsize),...] = w0[:, ::sub, ::sub]
-    w[c:(c+bsize),...] = sol_w
-    q[c:(c+bsize),...] = sol_q
-    v[c:(c+bsize),...] = sol_v
+    w_now[c:(c+bsize),...] = sol_w[..., 1::record_interval]
+    w_prev[c:(c+bsize),...] = sol_w[..., :-1:record_interval]
+    w_next[c:(c+bsize),...] = sol_w[..., 2::record_interval]
+    # q[c:(c+bsize),...] = sol_q
+    # v[c:(c+bsize),...] = sol_v
 
     c += bsize
     t1 = default_timer()
@@ -165,8 +171,8 @@ for j in range(N//bsize):
     print(f'Time elapsed: {default_timer() - t0:.2f} s')
     print('--'*20)
 
-scipy.io.savemat('../data/ns_data.mat', \
+scipy.io.savemat(f'../data/ns_data_T{T:.0f}_v{visc:.0e}_N{N}.mat', \
                  mdict={'a': a.cpu().numpy(), 
-                        'w': w.cpu().numpy(),
-                        'q': q.cpu().numpy(),
-                        'v': v.cpu().numpy()})
+                        'w': w_now.cpu().numpy(),
+                        'w_prev': w_prev.cpu().numpy(),
+                        'w_next': w_next.cpu().numpy()})

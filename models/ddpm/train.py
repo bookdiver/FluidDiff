@@ -14,6 +14,7 @@ from torch.optim import Adam, lr_scheduler
 from data import NaiverStokes_Dataset
 from diffuser import GaussianDiffusion
 from unet import Unet3D, EMA
+from physics_loss import vorticity_residual
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -27,7 +28,7 @@ parse.add_argument('--ema-decay', type=float, default=0.995, help='ema decay rat
 parse.add_argument('--epoch-start-ema', type=int, default=2, help='epoch to start ema, default 2')
 parse.add_argument('--train-batch-size', type=int, default=4, help='batch size for training, default 4')
 parse.add_argument('--test-batch-size', type=int, default=1, help='batch size for testing, default 1')
-parse.add_argument('--train-obj', type=str, choices=['pred_noise', 'pred_x0'], default='pred_noise', help='object for nn, default pred_noise')
+parse.add_argument('--train-obj', type=str, choices=['pred_noise', 'pred_x0'], default='pred_x0', help='object for nn, default pred_noise')
 parse.add_argument('--train-lr', type=float, default=1e-4, help='learning rate for training, default 1e-4')
 parse.add_argument('--train-lrf', type=float, default=0.1, help='learning rate factor for training, default 0.1')
 parse.add_argument('--train-epochs', type=int, default=100, help='number of epochs for training, default 100')
@@ -83,11 +84,11 @@ class Trainer:
 
         self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-5_T20_{phyloss_weight:.1f}phyloss_{train_obj}')
 
-        self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_V1e-5_T20_train.h5')
-        self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_V1e-5_T20_test.h5')
+        self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N1800.mat')
+        self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N200.mat')
 
-        self.train_dl = DataLoader(self.train_ds, batch_size=train_batch_size, shuffle=True, num_workers=4)
-        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=False, num_workers=4)
+        self.train_dl = DataLoader(self.train_ds, batch_size=train_batch_size, shuffle=True, num_workers=8)
+        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=False, num_workers=8)
 
         self.optimizer = Adam(self.diffusion_model.model.parameters(), lr=train_lr)
         lf = lambda x: ((1 + math.cos(x*math.pi/train_epochs)) / 2) * (1 - train_lrf) + train_lrf
@@ -135,12 +136,16 @@ class Trainer:
         for epoch in range(self.train_epochs):
 
             self.diffusion_model.model.train()
-            pbar_train = tqdm(self.train_dl)
+            pbar_train = tqdm(self.train_dl, dynamic_ncols=True)
             cum_train_loss = 0
             for i, data in enumerate(pbar_train):
                 x = data['x'].to(self.device)
+                x_prev = data['x_prev'].to(self.device)
+                x_next = data['x_next'].to(self.device)
                 y = data['y'].to(self.device)
-                loss, dn_loss, phy_loss = self.diffusion_model(x, cond=y)
+                x_pred, dn_loss = self.diffusion_model(x, cond=y)
+                phy_loss = self.phyloss_weight * vorticity_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                loss = dn_loss + self.phyloss_weight * phy_loss
                 cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
                 loss.backward()
@@ -154,13 +159,17 @@ class Trainer:
             self.step_ema()
 
             self.diffusion_model.model.eval()
-            pbar_test = tqdm(self.test_dl)
+            pbar_test = tqdm(self.test_dl, dynamic_ncols=True)
             with torch.no_grad():
                 cum_val_loss = 0
                 for i, data in enumerate(pbar_test):
                     x = data['x'].to(self.device)
+                    x_prev = data['x_prev'].to(self.device)
+                    x_next = data['x_next'].to(self.device)
                     y = data['y'].to(self.device)
-                    loss, dn_loss, phy_loss = self.diffusion_model(x, cond=y)
+                    x_pred, dn_loss = self.diffusion_model(x, cond=y)
+                    phy_loss = self.phyloss_weight * vorticity_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                    loss = dn_loss + self.phyloss_weight * phy_loss
                     cum_val_loss += loss.item()
                     pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
                     self.tb_writer.add_scalar('test/loss', loss.item(), epoch*len(self.test_dl)+i)
@@ -169,12 +178,19 @@ class Trainer:
                     print(f"Sampling at epoch {epoch}")
                     x_pred = self.diffusion_model.sample(cond=y)
                     x_pred = x_pred.cpu().numpy().squeeze()
-                    fig, ax = plt.subplots(4, 5, figsize=(20, 16))
-                    ax = ax.flatten()
+                    x = x.cpu().numpy().squeeze()
+                    fig1, ax1 = plt.subplots(4, 5, figsize=(20, 16))
+                    ax1 = ax1.flatten()
                     for i in range(20):
-                        ax[i].imshow(x_pred[i], cmap='jet')
-                        ax[i].axis('off')
-                    self.tb_writer.add_figure("Sampling on Test set", fig, epoch)
+                        ax1[i].imshow(x[i], cmap='jet')
+                        ax1[i].axis('off')
+                    fig2, ax2 = plt.subplots(4, 5, figsize=(20, 16))
+                    ax2 = ax2.flatten()
+                    for i in range(20):
+                        ax2[i].imshow(x_pred[i], cmap='jet')
+                        ax2[i].axis('off')
+                    self.tb_writer.add_figure("Ground truth", fig1, epoch)
+                    self.tb_writer.add_figure("Prediction", fig2, epoch)
 
             self.save_checkpoint()
             self.epoch += 1
