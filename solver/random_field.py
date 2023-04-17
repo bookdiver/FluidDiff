@@ -4,9 +4,11 @@ import math
 from timeit import default_timer
 
 
-class GaussianRF(object):
+class GaussianRF:
+    """ Generate a Gaussain random field with N(0, sigma * (-delta + tau**2) ** (-alpha) )
+    """
 
-    def __init__(self, dim, size, alpha=2, tau=3, sigma=None, boundary="periodic", device=None):
+    def __init__(self, dim, size, length=1.0, alpha=2, tau=3, sigma=None, boundary="periodic", device=None):
 
         self.dim = dim
         self.device = device
