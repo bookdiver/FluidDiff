@@ -19,7 +19,7 @@ from tqdm import tqdm
 def navier_stokes_2d(w0, f, visc, T, delta_t=1e-4, sampling_every=10, sub=1):
 
     #Grid size - must be power of 2
-    N = w0.size()[-1]
+    N = w0.size(-1)
 
     #Maximum frequency
     k_max = math.floor(N/2.0)
@@ -165,7 +165,6 @@ for j in range(N//bsize):
     # v[c:(c+bsize),...] = sol_v
 
     c += bsize
-    t1 = default_timer()
     # Print progress
     print(f'Progress: {j+1} / {N//bsize}')
     print(f'Time elapsed: {default_timer() - t0:.2f} s')

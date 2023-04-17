@@ -14,7 +14,7 @@ from torch.optim import Adam, lr_scheduler
 from data import NaiverStokes_Dataset
 from diffuser import GaussianDiffusion
 from unet import Unet3D, EMA
-from physics_loss import vorticity_residual
+from physics_loss import naiver_stokes_residual
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -82,7 +82,7 @@ class Trainer:
         self.phyloss_weight = phyloss_weight
         self.train_obj = train_obj
 
-        self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-5_T20_{phyloss_weight:.1f}phyloss_{train_obj}')
+        self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-3_T20_{phyloss_weight:.1f}phyloss_{train_obj}_resdiff')
 
         self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N1800.mat')
         self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N200.mat')
@@ -119,11 +119,11 @@ class Trainer:
             'ema_model_state_dict': self.ema_model.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            }, f'./ckpts/ns_V1e-5_T20_{self.phyloss_weight}phyloss_{self.train_obj}/ckpt.pt')
+            }, f'./ckpts/ns_V1e-3_T20_{self.phyloss_weight}phyloss_{self.train_obj}_resdiff/ckpt.pt')
         print("Checkpoint saved")
     
     def load_checkpoint(self, initialize_lr: bool=True):
-        checkpoint = torch.load(f'./ckpts/ns_V1e-5_T20_{self.phyloss_weight}phyloss_{self.train_obj}/ckpt.pt')
+        checkpoint = torch.load(f'./ckpts/ns_V1e-3_T20_{self.phyloss_weight}phyloss_{self.train_obj}_resdiff/ckpt.pt')
         self.diffusion_model.model.load_state_dict(checkpoint['model_state_dict'])
         self.ema_model.model.load_state_dict(checkpoint['ema_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -133,7 +133,7 @@ class Trainer:
         print("Training resumed")
 
     def train(self):
-        for epoch in range(self.train_epochs):
+        for epoch in range(self.epoch, self.train_epochs+1):
 
             self.diffusion_model.model.train()
             pbar_train = tqdm(self.train_dl, dynamic_ncols=True)
@@ -144,7 +144,7 @@ class Trainer:
                 x_next = data['x_next'].to(self.device)
                 y = data['y'].to(self.device)
                 x_pred, dn_loss = self.diffusion_model(x, cond=y)
-                phy_loss = self.phyloss_weight * vorticity_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
                 loss = dn_loss + self.phyloss_weight * phy_loss
                 cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
@@ -168,7 +168,7 @@ class Trainer:
                     x_next = data['x_next'].to(self.device)
                     y = data['y'].to(self.device)
                     x_pred, dn_loss = self.diffusion_model(x, cond=y)
-                    phy_loss = self.phyloss_weight * vorticity_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                    phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
                     loss = dn_loss + self.phyloss_weight * phy_loss
                     cum_val_loss += loss.item()
                     pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
@@ -179,12 +179,12 @@ class Trainer:
                     x_pred = self.diffusion_model.sample(cond=y)
                     x_pred = x_pred.cpu().numpy().squeeze()
                     x = x.cpu().numpy().squeeze()
-                    fig1, ax1 = plt.subplots(4, 5, figsize=(20, 16))
+                    fig1, ax1 = plt.subplots(4, 5, figsize=(10, 8))
                     ax1 = ax1.flatten()
                     for i in range(20):
                         ax1[i].imshow(x[i], cmap='jet')
                         ax1[i].axis('off')
-                    fig2, ax2 = plt.subplots(4, 5, figsize=(20, 16))
+                    fig2, ax2 = plt.subplots(4, 5, figsize=(10, 8))
                     ax2 = ax2.flatten()
                     for i in range(20):
                         ax2[i].imshow(x_pred[i], cmap='jet')
@@ -200,8 +200,8 @@ class Trainer:
 
 if __name__ == '__main__':
     args = parse.parse_args()
-    os.makedirs(f'./ckpts/ns_V1e-5_T20_{args.phyloss_weight}phyloss_{args.train_obj}', exist_ok=True)
-    save_config(args, f'./ckpts/ns_V1e-5_T20_{args.phyloss_weight}phyloss_{args.train_obj}')
+    os.makedirs(f'./ckpts/ns_V1e-3_T20_{args.phyloss_weight}phyloss_{args.train_obj}_resdiff', exist_ok=True)
+    save_config(args, f'./ckpts/ns_V1e-3_T20_{args.phyloss_weight}phyloss_{args.train_obj}_resdiff')
 
     model = Unet3D(
         channels=1,
@@ -219,7 +219,7 @@ if __name__ == '__main__':
     )
     diffusion_model = diffusion_model.to(args.device_no)
     trainer = Trainer(diffusion_model=diffusion_model, **vars(args))
-    set_random_seed(seed=1234, benchmark=False)
+    set_random_seed(seed=615, benchmark=False)
     trainer.train()
 
 
