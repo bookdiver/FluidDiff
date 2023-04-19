@@ -1,7 +1,7 @@
 import torch
 import math
 
-from random_field import GaussianRF
+from random_field import GaussianRF, GRF_Mattern
 
 import scipy.io
 from tqdm import tqdm
@@ -92,7 +92,7 @@ class BurgersEq1D():
         return u_new
 
     def burgers_driver(self, u0, save_interval=10):
-        self.u0 = u0[:self.Nx]
+        self.u0 = u0
         self.u = self.u0
         self.i_t = 0
         self.U = []
@@ -110,40 +110,44 @@ class BurgersEq1D():
             if save_interval != 0 and self.i_t % save_interval == 0:
                 self.U.append(self.u)
 
-        return torch.stack(self.U)
+        self.t = 0
+
+        return torch.stack(self.U).permute(1, 0, 2)
 
 if __name__ == '__main__':
     device = torch.device('cuda:0')
 
     #Number of solutions to generate
-    N = 200
+    N = 100
 
     #Batch size
-    bsize = 100
+    bsize = N
 
-    Nx = 128
+    Nx = 4096
     T = 1.0
-    dt = 1e-4
-    dt_save = 1e-2
+    dt = 1/12800
+    dt_save = 1/128
     save_interval = int(dt_save/dt)
-    visc = 1e-2
+    visc = 0.1
 
-    GRF = GaussianRF(dim=1, size=128, alpha=2, tau=5, sigma=1, device=device)
+    GRF = GaussianRF(dim=1, size=Nx, alpha=2, tau=5, sigma=625, device=device)
+    # GRF = GRF_Mattern(1, Nx, length=1.0, nu=None, l=0.1, sigma=0.5, boundary="periodic", device=device)
 
     burgers = BurgersEq1D(Nx=Nx, T=T, dt=dt, nu=visc, device=device)
 
     a = torch.zeros(N, Nx, device=device)
-    u = torch.zeros(N, int(T/dt_save)+1, Nx, device=device)
+    u = torch.zeros(N, int(T/dt_save), Nx, device=device)
 
     c = 0
 
     t0 = default_timer()
     for j in range(N//bsize):
-        u0 = GRF.sample(N=bsize)
+        u0 = GRF.sample(bsize)
         a[c:c+bsize, :] = u0
 
-        U = torch.vmap(burgers.burgers_driver, in_dims=(0, None))(u0, save_interval)
-        u[c:c+bsize, :, :] = U
+        # U = torch.vmap(burgers.burgers_driver, in_dims=(0, None))(u0, save_interval)
+        U = burgers.burgers_driver(u0, save_interval)
+        u[c:c+bsize, :, :] = U[:, 1:, :]
 
         c += bsize
 

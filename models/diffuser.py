@@ -296,7 +296,7 @@ class GaussianDiffusion(nn.Module):
         return self.p_losses(x0, t, *args, **kwargs)
 
 def test():
-    from unet import Unet3D
+    from FluidDiff.models.unet3d import Unet3D
     eps_model = Unet3D(
         channels=1,
         cond_channels=1,

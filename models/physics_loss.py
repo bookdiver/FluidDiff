@@ -13,12 +13,12 @@ def burgers_residual(u, visc=1e-2, dt=1e-2, u0=None):
                         reshape(1, 1, 1, nx)
     
     def cal_residual(u):
-        u_h = torch.fft.fft(u, dim=-1)
+        u_h = torch.fft.fft(u, dim=3)
         
-        ux_h = 1j * k_x * u_h
-        uxx_h = 1j * k_x * ux_h
-        ux = torch.fft.ifft(ux_h[:, :, :, :], dim=-1, n=nx).real
-        uxx = torch.fft.ifft(uxx_h[:, :, :, :], dim=-1, n=nx).real
+        ux_h = 1j  * k_x * u_h
+        uxx_h = 1j  * k_x * ux_h
+        ux = torch.fft.irfft(ux_h[:, :, :, :], dim=3, n=nx)
+        uxx = torch.fft.irfft(uxx_h[:, :, :, :], dim=3, n=nx)
 
         ut = (u[:, :, 2:, :] - u[:, :, :-2, :]) / (2 * dt)
         res = ut + (u * ux - visc * uxx)[:, :, 1:-1, :]
@@ -35,7 +35,7 @@ def burgers_residual(u, visc=1e-2, dt=1e-2, u0=None):
     
 
 
-def navier_stokes_residual(w, w_prev, w_next, visc, dt, w0=None):
+def naiver_stokes_residual(w, w_prev, w_next, visc, dt, w0=None):
     _, _, _, nx, ny = w.shape
     device = w.device
 

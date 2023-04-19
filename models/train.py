@@ -11,10 +11,11 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim import Adam, lr_scheduler
 
-from data import NaiverStokes_Dataset
+from data import NaiverStokes_Dataset, Burgers_Dataset
 from diffuser import GaussianDiffusion
-from unet import Unet3D, EMA
-from physics_loss import naiver_stokes_residual
+from unet3d import Unet3D, EMA
+from unet2d import Unet2D
+from physics_loss import naiver_stokes_residual, burgers_residual
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -23,6 +24,7 @@ matplotlib.use('Agg')
 
 parse = argparse.ArgumentParser(description='3D Denoising Diffusion Training')
 
+parse.add_argument('--experiment', type=str, choices=['ns', 'burgers'], default='ns', help='experiment to run, default ns')
 parse.add_argument('--device-no', type=int, default=0, help='device to use (default 0)')
 parse.add_argument('--ema-decay', type=float, default=0.995, help='ema decay rate, default 0.995')
 parse.add_argument('--epoch-start-ema', type=int, default=2, help='epoch to start ema, default 2')
@@ -33,7 +35,7 @@ parse.add_argument('--train-lr', type=float, default=1e-4, help='learning rate f
 parse.add_argument('--train-lrf', type=float, default=0.1, help='learning rate factor for training, default 0.1')
 parse.add_argument('--train-epochs', type=int, default=100, help='number of epochs for training, default 100')
 parse.add_argument('--resume-training', action='store_true', help='resume training')
-parse.add_argument('--phyloss_weight', type=float, default=0.0, help='weight of physical loss, default 0.0')
+parse.add_argument('--phyloss-weight', type=float, default=0.0, help='weight of physical loss, default 0.0')
 
 def save_config(
         args: argparse.Namespace, 
@@ -56,6 +58,14 @@ def set_random_seed(
     if benchmark:
         torch.backends.cudnn.benchmark = True
 
+def get_physics_informed_loss(loss_type: str):
+    if loss_type == 'naiver_stokes':
+        return naiver_stokes_residual
+    elif loss_type == 'burgers':
+        return burgers_residual
+    else:
+        raise ValueError('loss type not supported')
+
 class Trainer:
     def __init__(
             self,
@@ -71,7 +81,11 @@ class Trainer:
             train_lrf: float=0.1,
             train_epochs: int=100,
             resume_training: bool=False,
-            phyloss_weight: float=0.1
+            phyloss_weight: float=0.1,
+            train_dataset: torch.utils.data.Dataset=None,
+            test_dataset: torch.utils.data.Dataset=None,
+            tb_writer: SummaryWriter=None,
+            experiment: str='ns'
             ):
         
         self.device = torch.device('cuda', device_no)
@@ -82,13 +96,17 @@ class Trainer:
         self.phyloss_weight = phyloss_weight
         self.train_obj = train_obj
 
-        self.tb_writer = SummaryWriter(log_dir=f'./logs/ns_V1e-3_T20_{phyloss_weight:.1f}phyloss_{train_obj}_resdiff')
+        # self.tb_writer = SummaryWriter(log_dir=f'./logs/_V1e-3_T20_{phyloss_weight:.1f}phyloss_{train_obj}_resdiff')
+        self.tb_writer = tb_writer
+        self.experiment = experiment
 
-        self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N1800.mat')
-        self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N200.mat')
+        # self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N1800.mat')
+        # self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N200.mat')
+        self.train_ds = train_dataset
+        self.test_ds = test_dataset
 
         self.train_dl = DataLoader(self.train_ds, batch_size=train_batch_size, shuffle=True, num_workers=8)
-        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=False, num_workers=8)
+        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=True, num_workers=8)
 
         self.optimizer = Adam(self.diffusion_model.model.parameters(), lr=train_lr)
         lf = lambda x: ((1 + math.cos(x*math.pi/train_epochs)) / 2) * (1 - train_lrf) + train_lrf
@@ -103,6 +121,26 @@ class Trainer:
 
         print("Trainer initialized, the network is objective to:", diffusion_model.objective)
     
+    def save_checkpoint(self):
+        torch.save({
+            'epoch': self.epoch,
+            'model_state_dict': self.diffusion_model.model.state_dict(),
+            'ema_model_state_dict': self.ema_model.model.state_dict(),
+            'optimizer_state_dict': self.optimizer.state_dict(),
+            'scheduler_state_dict': self.scheduler.state_dict(),
+            }, f'./ckpts/{self.experiment}_{self.phyloss_weight}phyloss/ckpt.pt')
+        print("Checkpoint saved")
+
+    def load_checkpoint(self, initialize_lr: bool=False):
+        checkpoint = torch.load(f'./ckpts/{self.experiment}_{self.phyloss_weight}phyloss/ckpt.pt')
+        self.diffusion_model.model.load_state_dict(checkpoint['model_state_dict'])
+        self.ema_model.model.load_state_dict(checkpoint['ema_model_state_dict'])
+        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        if not initialize_lr:
+            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        self.epoch = checkpoint['epoch']
+        print("Training resumed")
+    
     def reset_parameters(self):
         self.ema_model.model.load_state_dict(self.diffusion_model.model.state_dict())
     
@@ -111,26 +149,6 @@ class Trainer:
             self.reset_parameters()
             return
         self.ema.update_model_average(self.ema_model.model, self.diffusion_model.model)
-    
-    def save_checkpoint(self):
-        torch.save({
-            'epoch': self.epoch,
-            'model_state_dict': self.diffusion_model.model.state_dict(),
-            'ema_model_state_dict': self.ema_model.model.state_dict(),
-            'optimizer_state_dict': self.optimizer.state_dict(),
-            'scheduler_state_dict': self.scheduler.state_dict(),
-            }, f'./ckpts/ns_V1e-3_T20_{self.phyloss_weight}phyloss_{self.train_obj}_resdiff/ckpt.pt')
-        print("Checkpoint saved")
-    
-    def load_checkpoint(self, initialize_lr: bool=True):
-        checkpoint = torch.load(f'./ckpts/ns_V1e-3_T20_{self.phyloss_weight}phyloss_{self.train_obj}_resdiff/ckpt.pt')
-        self.diffusion_model.model.load_state_dict(checkpoint['model_state_dict'])
-        self.ema_model.model.load_state_dict(checkpoint['ema_model_state_dict'])
-        self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-        if not initialize_lr:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        self.epoch = checkpoint['epoch']
-        print("Training resumed")
 
     def train(self):
         for epoch in range(self.epoch, self.train_epochs+1):
@@ -140,11 +158,12 @@ class Trainer:
             cum_train_loss = 0
             for i, data in enumerate(pbar_train):
                 x = data['x'].to(self.device)
-                x_prev = data['x_prev'].to(self.device)
-                x_next = data['x_next'].to(self.device)
+                # x_prev = data['x_prev'].to(self.device)
+                # x_next = data['x_next'].to(self.device)
                 y = data['y'].to(self.device)
                 x_pred, dn_loss = self.diffusion_model(x, cond=y)
-                phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                # phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
                 loss = dn_loss + self.phyloss_weight * phy_loss
                 cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
@@ -164,11 +183,12 @@ class Trainer:
                 cum_val_loss = 0
                 for i, data in enumerate(pbar_test):
                     x = data['x'].to(self.device)
-                    x_prev = data['x_prev'].to(self.device)
-                    x_next = data['x_next'].to(self.device)
+                    # x_prev = data['x_prev'].to(self.device)
+                    # x_next = data['x_next'].to(self.device)
                     y = data['y'].to(self.device)
                     x_pred, dn_loss = self.diffusion_model(x, cond=y)
-                    phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                    # phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                    phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
                     loss = dn_loss + self.phyloss_weight * phy_loss
                     cum_val_loss += loss.item()
                     pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
@@ -179,16 +199,28 @@ class Trainer:
                     x_pred = self.diffusion_model.sample(cond=y)
                     x_pred = x_pred.cpu().numpy().squeeze()
                     x = x.cpu().numpy().squeeze()
-                    fig1, ax1 = plt.subplots(4, 5, figsize=(10, 8))
+                    # fig1, ax1 = plt.subplots(4, 5, figsize=(10, 8))
+                    # ax1 = ax1.flatten()
+                    # for i in range(20):
+                    #     ax1[i].imshow(x[i], cmap='jet')
+                    #     ax1[i].axis('off')
+                    # fig2, ax2 = plt.subplots(4, 5, figsize=(10, 8))
+                    # ax2 = ax2.flatten()
+                    # for i in range(20):
+                    #     ax2[i].imshow(x_pred[i], cmap='jet')
+                    #     ax2[i].axis('off')
+                    fig1, ax1 = plt.subplots(2, 2, figsize=(8, 8))
                     ax1 = ax1.flatten()
-                    for i in range(20):
-                        ax1[i].imshow(x[i], cmap='jet')
+                    for i in range(4):
+                        im1 = ax1[i].imshow(x[i], cmap='jet')
                         ax1[i].axis('off')
-                    fig2, ax2 = plt.subplots(4, 5, figsize=(10, 8))
+                    fig1.colorbar(im1, ax=ax1)
+                    fig2, ax2 = plt.subplots(2, 2, figsize=(8, 8))
                     ax2 = ax2.flatten()
-                    for i in range(20):
-                        ax2[i].imshow(x_pred[i], cmap='jet')
+                    for i in range(4):
+                        im2 = ax2[i].imshow(x_pred[i], cmap='jet')
                         ax2[i].axis('off')
+                    fig2.colorbar(im2, ax=ax2) 
                     self.tb_writer.add_figure("Ground truth", fig1, epoch)
                     self.tb_writer.add_figure("Prediction", fig2, epoch)
 
@@ -200,26 +232,33 @@ class Trainer:
 
 if __name__ == '__main__':
     args = parse.parse_args()
-    os.makedirs(f'./ckpts/ns_V1e-3_T20_{args.phyloss_weight}phyloss_{args.train_obj}_resdiff', exist_ok=True)
-    save_config(args, f'./ckpts/ns_V1e-3_T20_{args.phyloss_weight}phyloss_{args.train_obj}_resdiff')
+    os.makedirs(f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss', exist_ok=True)
+    save_config(args, f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
 
-    model = Unet3D(
+    model = Unet2D(
         channels=1,
         cond_channels=1,
-        channel_mults=(1, 2, 4, 8, 16),
+        channel_mults=(1, 2, 4, 8),
         init_conv_channels=32,
         init_conv_kernel_size=5
     )
     diffusion_model = GaussianDiffusion(
         model=model,
-        sample_size=(1, 20, 64, 64),
-        timesteps=1000,
+        sample_size=(1, 100, 128),
+        timesteps=800,
         objective=args.train_obj,
         physics_loss_weight=args.phyloss_weight
     )
     diffusion_model = diffusion_model.to(args.device_no)
-    trainer = Trainer(diffusion_model=diffusion_model, **vars(args))
-    set_random_seed(seed=615, benchmark=False)
-    trainer.train()
 
+    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
+    train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat", normalize=False)
+    test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat", normalize=False)
+    trainer = Trainer(diffusion_model=diffusion_model, 
+                      train_dataset=train_dataset,
+                      test_dataset=test_dataset,
+                      tb_writer=tb_writer,
+                      **vars(args))
+    set_random_seed(seed=234, benchmark=False)
+    trainer.train()
 
