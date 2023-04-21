@@ -30,7 +30,7 @@ parse.add_argument('--ema-decay', type=float, default=0.995, help='ema decay rat
 parse.add_argument('--epoch-start-ema', type=int, default=2, help='epoch to start ema, default 2')
 parse.add_argument('--train-batch-size', type=int, default=4, help='batch size for training, default 4')
 parse.add_argument('--test-batch-size', type=int, default=1, help='batch size for testing, default 1')
-parse.add_argument('--train-obj', type=str, choices=['pred_noise', 'pred_x0'], default='pred_x0', help='object for nn, default pred_noise')
+parse.add_argument('--train-obj', type=str, choices=['pred_noise', 'pred_x0'], default='pred_x0', help='object for nn, default pred_x0')
 parse.add_argument('--train-lr', type=float, default=1e-4, help='learning rate for training, default 1e-4')
 parse.add_argument('--train-lrf', type=float, default=0.1, help='learning rate factor for training, default 0.1')
 parse.add_argument('--train-epochs', type=int, default=100, help='number of epochs for training, default 100')
@@ -106,7 +106,7 @@ class Trainer:
         self.test_ds = test_dataset
 
         self.train_dl = DataLoader(self.train_ds, batch_size=train_batch_size, shuffle=True, num_workers=8)
-        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=True, num_workers=8)
+        self.test_dl = DataLoader(self.test_ds, batch_size=test_batch_size, shuffle=False, num_workers=8)
 
         self.optimizer = Adam(self.diffusion_model.model.parameters(), lr=train_lr)
         lf = lambda x: ((1 + math.cos(x*math.pi/train_epochs)) / 2) * (1 - train_lrf) + train_lrf
@@ -128,11 +128,11 @@ class Trainer:
             'ema_model_state_dict': self.ema_model.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            }, f'./ckpts/{self.experiment}_{self.phyloss_weight}phyloss/ckpt.pt')
+            }, f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss_resdiff/ckpt.pt')
         print("Checkpoint saved")
 
     def load_checkpoint(self, initialize_lr: bool=False):
-        checkpoint = torch.load(f'./ckpts/{self.experiment}_{self.phyloss_weight}phyloss/ckpt.pt')
+        checkpoint = torch.load(f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss_resdiff/ckpt.pt')
         self.diffusion_model.model.load_state_dict(checkpoint['model_state_dict'])
         self.ema_model.model.load_state_dict(checkpoint['ema_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -163,7 +163,7 @@ class Trainer:
                 y = data['y'].to(self.device)
                 x_pred, dn_loss = self.diffusion_model(x, cond=y)
                 # phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
-                phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2, u0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
                 loss = dn_loss + self.phyloss_weight * phy_loss
                 cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
@@ -188,7 +188,7 @@ class Trainer:
                     y = data['y'].to(self.device)
                     x_pred, dn_loss = self.diffusion_model(x, cond=y)
                     # phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
-                    phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                    phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2, u0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
                     loss = dn_loss + self.phyloss_weight * phy_loss
                     cum_val_loss += loss.item()
                     pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
@@ -232,8 +232,8 @@ class Trainer:
 
 if __name__ == '__main__':
     args = parse.parse_args()
-    os.makedirs(f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss', exist_ok=True)
-    save_config(args, f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
+    os.makedirs(f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss_resdiff', exist_ok=True)
+    save_config(args, f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss_resdiff')
 
     model = Unet2D(
         channels=1,
@@ -251,7 +251,7 @@ if __name__ == '__main__':
     )
     diffusion_model = diffusion_model.to(args.device_no)
 
-    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
+    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss_resdiff')
     train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat", normalize=False)
     test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat", normalize=False)
     trainer = Trainer(diffusion_model=diffusion_model, 

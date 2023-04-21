@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import Dataset
 
 class Burgers_Dataset(Dataset):
-    def __init__(self, data_dir, normalize=True):
+    def __init__(self, data_dir, normalize=False):
         data = sio.loadmat(data_dir)
         to_tensor = lambda x: torch.from_numpy(x).unsqueeze(1).to(torch.float32)
         self.a = to_tensor(data['a'])

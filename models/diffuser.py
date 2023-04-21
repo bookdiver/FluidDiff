@@ -195,7 +195,7 @@ class GaussianDiffusion(nn.Module):
         
         x0_preds = []
 
-        for t in tqdm(reversed(range(0, self.num_timesteps)), desc='DDPM sampling', total=self.num_timesteps):
+        for t in tqdm(reversed(range(0, self.num_timesteps)), desc='DDPM sampling', total=self.num_timesteps, dynamic_ncols=True):
             xt, x0_pred = self.p_sample(xt=xt, t=t, cond=cond)
             x0_preds.append(x0_pred)
 
@@ -233,7 +233,7 @@ class GaussianDiffusion(nn.Module):
 
         x0_preds = []
 
-        for t, t_next in tqdm(time_pairs, desc='DDIM sampling', total=len(time_pairs)):
+        for t, t_next in tqdm(time_pairs, desc='DDIM sampling', total=len(time_pairs), dynamic_ncols=True):
             xt, x0_pred = self.ddim_sample(xt=xt, t=t, t_next=t_next, cond=cond)
             x0_preds.append(x0_pred)
 
