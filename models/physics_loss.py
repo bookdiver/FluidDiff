@@ -96,9 +96,40 @@ def naiver_stokes_residual(w, w_prev, w_next, visc, dt, w0=None):
 
     return loss
 
+def darcy_residual(a, u, length=1, a0=None):
+    nx = u.size(-1)
+    dx = length / nx
+    dy = dx 
+
+    def cal_lhs(a):
+        ux = (u[:, :, 2:, 1:-1] - u[:, :, :-2, 1:-1]) / (2 * dx)
+        uy = (u[:, :, 1:-1, 2:] - u[:, :, 1:-1, :-2]) / (2 * dy)
+
+        a = a[:, :, 1:-1, 1:-1]
+
+        aux = a * ux
+        auy = a * uy
+        auxx = (aux[:, :, 2:, 1:-1] - aux[:, :, :-2, 1:-1]) / (2 * dx)
+        auyy = (auy[:, :, 1:-1, 2:] - auy[:, :, 1:-1, :-2]) / (2 * dy)
+        
+        res = - (auxx + auyy)
+
+        return res
+    
+    lhs_a = cal_lhs(a)
+    f = torch.ones_like(lhs_a, device=u.device)
+    res_a = lhs_a - f
+    loss = torch.mean(res_a ** 2)
+    if a0 is not None:
+        lhs_a0 = cal_lhs
+        res_a0 = lhs_a0 - f
+        loss = torch.mean((res_a - res_a0) ** 2)
+
+    return loss
+
+
 if __name__ == '__main__':
-    u = torch.rand(200, 1, 100, 128)
-    u_prev = torch.rand(200, 1, 100, 128)
-    u_next = torch.rand(200, 1, 100, 128)
-    loss = burgers_residual(u, u_prev, u_next)
+    u = torch.rand(4, 1, 241, 241)
+    a = torch.rand(4, 1, 241, 241)
+    loss = darcy_residual(a, u)
     print(loss)

@@ -39,11 +39,30 @@ class NaiverStokes_Dataset(Dataset):
                 'x_prev': self.w_prev[idx],
                 'x_next': self.w_next[idx],
                 'y': self.a[idx]}
+    
+class Darcys_Dataset(Dataset):
+    def __init__(self, data_dir, normalize=True):
+        data = sio.loadmat(data_dir)
+        to_tensor = lambda x: torch.from_numpy(x)[:, 1:, 1:].unsqueeze(1).to(torch.float32)
+        self.a = to_tensor(data['coeff'])
+        self.u = to_tensor(data['sol'])
+        if normalize:
+            self.a = (self.a - self.a.min()) / (self.a.max() - self.a.min())
+
+        print(f"Loaded {len(self.a)} samples from {data_dir}")
+        print(f"Shape of x: {self.u.shape}")
+
+    def __len__(self):
+        return len(self.a)
+    
+    def __getitem__(self, idx):
+        return {'x': self.a[idx], 'y': self.u[idx]}
+    
 
 if __name__ == "__main__":
-    data_dir = "../data/burgers_data_v1e-02_N200.mat"
+    data_dir = "../data/darcy_data_r241_N1800.mat"
     # dataset = NaiverStokes_Dataset(data_dir)
-    dataset = Burgers_Dataset(data_dir)
+    dataset = Darcys_Dataset(data_dir)
     print(dataset[0]['x'].shape)
     print(dataset[0]['y'].shape)
     # print(dataset[0]['x_prev'].shape)

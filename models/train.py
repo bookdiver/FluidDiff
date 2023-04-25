@@ -11,11 +11,12 @@ from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from torch.optim import Adam, lr_scheduler
 
-from data import NaiverStokes_Dataset, Burgers_Dataset
+from data import NaiverStokes_Dataset, Burgers_Dataset, Darcys_Dataset
 from diffuser import GaussianDiffusion
 from unet3d import Unet3D, EMA
 from unet2d import Unet2D
-from physics_loss import naiver_stokes_residual, burgers_residual
+from unet2d_spatial import Unet2D_Spatial
+from physics_loss import naiver_stokes_residual, burgers_residual, darcy_residual
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -24,7 +25,7 @@ matplotlib.use('Agg')
 
 parse = argparse.ArgumentParser(description='3D Denoising Diffusion Training')
 
-parse.add_argument('--experiment', type=str, choices=['ns', 'burgers'], default='ns', help='experiment to run, default ns')
+parse.add_argument('--experiment', type=str, choices=['ns', 'burgers', 'darcy'], default='ns', help='experiment to run, default ns')
 parse.add_argument('--device-no', type=int, default=0, help='device to use (default 0)')
 parse.add_argument('--ema-decay', type=float, default=0.995, help='ema decay rate, default 0.995')
 parse.add_argument('--epoch-start-ema', type=int, default=2, help='epoch to start ema, default 2')
@@ -58,11 +59,13 @@ def set_random_seed(
     if benchmark:
         torch.backends.cudnn.benchmark = True
 
-def get_physics_informed_loss(loss_type: str):
+def get_physics_informed_loss(loss_type: str, *args, **kwargs):
     if loss_type == 'naiver_stokes':
-        return naiver_stokes_residual
+        return naiver_stokes_residual(*args, **kwargs)
     elif loss_type == 'burgers':
-        return burgers_residual
+        return burgers_residual(*args, **kwargs)
+    elif loss_type == 'darcy':
+        return darcy_residual(*args, **kwargs)
     else:
         raise ValueError('loss type not supported')
 
@@ -96,12 +99,8 @@ class Trainer:
         self.phyloss_weight = phyloss_weight
         self.train_obj = train_obj
 
-        # self.tb_writer = SummaryWriter(log_dir=f'./logs/_V1e-3_T20_{phyloss_weight:.1f}phyloss_{train_obj}_resdiff')
         self.tb_writer = tb_writer
         self.experiment = experiment
-
-        # self.train_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N1800.mat')
-        # self.test_ds = NaiverStokes_Dataset(data_dir='../../data/ns_data_T20_v1e-03_N200.mat')
         self.train_ds = train_dataset
         self.test_ds = test_dataset
 
@@ -128,11 +127,11 @@ class Trainer:
             'ema_model_state_dict': self.ema_model.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            }, f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss_resdiff/ckpt.pt')
+            }, f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss/ckpt.pt')
         print("Checkpoint saved")
 
     def load_checkpoint(self, initialize_lr: bool=False):
-        checkpoint = torch.load(f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss_resdiff/ckpt.pt')
+        checkpoint = torch.load(f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss/ckpt.pt')
         self.diffusion_model.model.load_state_dict(checkpoint['model_state_dict'])
         self.ema_model.model.load_state_dict(checkpoint['ema_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -158,12 +157,17 @@ class Trainer:
             cum_train_loss = 0
             for i, data in enumerate(pbar_train):
                 x = data['x'].to(self.device)
-                # x_prev = data['x_prev'].to(self.device)
-                # x_next = data['x_next'].to(self.device)
+                if self.experiment == 'ns':
+                    x_prev = data['x_prev'].to(self.device)
+                    x_next = data['x_next'].to(self.device)
                 y = data['y'].to(self.device)
                 x_pred, dn_loss = self.diffusion_model(x, cond=y)
-                # phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
-                phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2, u0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                if self.experiment == 'burgers':
+                    phy_loss = get_physics_informed_loss(self.experiment, u=x_pred, visc=1e-2, dt=1e-2)
+                elif self.experiment == 'ns':
+                    phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next, visc=1e-3, dt=1e-3)
+                elif self.experiment == 'darcy':
+                    phy_loss = get_physics_informed_loss(self.experiment, a=x_pred, u=y)
                 loss = dn_loss + self.phyloss_weight * phy_loss
                 cum_train_loss += loss.item()
                 self.optimizer.zero_grad()
@@ -172,7 +176,7 @@ class Trainer:
                 pbar_train.set_description(f'Train Epoch {epoch}/{self.train_epochs}, Avg Loss: {cum_train_loss / (i+1):.4f}')
                 self.tb_writer.add_scalar('train/loss', loss.item(), epoch*len(self.train_dl)+i)
                 self.tb_writer.add_scalar('train/dn_loss', dn_loss.item(), epoch*len(self.train_dl)+i)
-                self.tb_writer.add_scalar('train/phy_loss', phy_loss.item(), epoch*len(self.train_dl)+i)
+                self.tb_writer.add_scalar('train/phy_loss', self.phyloss_weight * phy_loss.item(), epoch*len(self.train_dl)+i)
 
             self.scheduler.step()
             self.step_ema()
@@ -183,12 +187,17 @@ class Trainer:
                 cum_val_loss = 0
                 for i, data in enumerate(pbar_test):
                     x = data['x'].to(self.device)
-                    # x_prev = data['x_prev'].to(self.device)
-                    # x_next = data['x_next'].to(self.device)
+                    if self.experiment == 'ns':
+                        x_prev = data['x_prev'].to(self.device)
+                        x_next = data['x_next'].to(self.device)
                     y = data['y'].to(self.device)
                     x_pred, dn_loss = self.diffusion_model(x, cond=y)
-                    # phy_loss = self.phyloss_weight * naiver_stokes_residual(x_pred, x_prev, x_next, visc=1e-3, dt=1e-3, w0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
-                    phy_loss = self.phyloss_weight * get_physics_informed_loss('burgers')(x_pred, visc=1e-2, dt=1e-2, u0=x) if self.phyloss_weight > 0 else torch.tensor(0., device=self.device)
+                    if self.experiment == 'burgers':
+                        phy_loss = get_physics_informed_loss(self.experiment, u=x_pred, visc=1e-2, dt=1e-2)
+                    elif self.experiment == 'ns':
+                        phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next, visc=1e-3, dt=1e-3)
+                    elif self.experiment == 'darcy':
+                        phy_loss = get_physics_informed_loss(self.experiment, a=x_pred, u=y)
                     loss = dn_loss + self.phyloss_weight * phy_loss
                     cum_val_loss += loss.item()
                     pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
@@ -232,10 +241,10 @@ class Trainer:
 
 if __name__ == '__main__':
     args = parse.parse_args()
-    os.makedirs(f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss_resdiff', exist_ok=True)
-    save_config(args, f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss_resdiff')
+    os.makedirs(f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss', exist_ok=True)
+    save_config(args, f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
 
-    model = Unet2D(
+    model = Unet2D_Spatial(
         channels=1,
         cond_channels=1,
         channel_mults=(1, 2, 4, 8),
@@ -244,16 +253,18 @@ if __name__ == '__main__':
     )
     diffusion_model = GaussianDiffusion(
         model=model,
-        sample_size=(1, 100, 128),
+        sample_size=(1, 240, 240),
         timesteps=800,
         objective=args.train_obj,
         physics_loss_weight=args.phyloss_weight
     )
     diffusion_model = diffusion_model.to(args.device_no)
 
-    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss_resdiff')
-    train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat", normalize=False)
-    test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat", normalize=False)
+    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
+    # train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat", normalize=False)
+    # test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat", normalize=False)
+    train_dataset = Darcys_Dataset('../data/darcy_data_r241_N1800.mat')
+    test_dataset = Darcys_Dataset('../data/darcy_data_r241_N200.mat')
     trainer = Trainer(diffusion_model=diffusion_model, 
                       train_dataset=train_dataset,
                       test_dataset=test_dataset,

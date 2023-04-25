@@ -178,14 +178,14 @@ class GaussianDiffusion(nn.Module):
     def p_sample(self, xt: torch.Tensor, t: int, cond: torch.Tensor) -> tuple:
         bs, device = xt.shape[0], xt.device
         batched_ts = torch.full((bs, ), t, device=device, dtype=torch.long)
-        if self.objective == 'pred_noise':
-            posterior_mean, _, log_posterior_variance, x0_pred = self.get_p_sample_mean_variance(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=False)
-            eps = torch.randn_like(xt) if t > 0 else 0
-            x_tm1 = posterior_mean + (0.5 * log_posterior_variance).exp() * eps
-        elif self.objective == 'pred_x0':
-            _, _, _, x0_pred = self.get_p_sample_mean_variance(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=False)
-            batched_tm1s = torch.full((bs, ), t - 1, device=device, dtype=torch.long)
-            x_tm1 = self.q_sample(x0=x0_pred, t=batched_tm1s) if t>1 else x0_pred
+        # if self.objective == 'pred_noise':
+        posterior_mean, _, log_posterior_variance, x0_pred = self.get_p_sample_mean_variance(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=False)
+        eps = torch.randn_like(xt) if t > 0 else 0
+        x_tm1 = posterior_mean + (0.5 * log_posterior_variance).exp() * eps
+        # elif self.objective == 'pred_x0':
+        #     _, _, _, x0_pred = self.get_p_sample_mean_variance(xt=xt, t=batched_ts, cond=cond, clip_x0_pred=False)
+        #     batched_tm1s = torch.full((bs, ), t - 1, device=device, dtype=torch.long)
+        #     x_tm1 = self.q_sample(x0=x0_pred, t=batched_tm1s) if t>1 else x0_pred
 
         return x_tm1, x0_pred
     
