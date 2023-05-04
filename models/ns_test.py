@@ -38,10 +38,10 @@ def make_multiple_predictions(conds,
         ckpt = torch.load(f'./ckpts/ns_{physics_loss_weight:.2f}phyloss/ckpt.pt',
                             map_location={'cuda:1':'cuda:0'})
 
-    diffusion_model.load_state_dict(ckpt['model_state_dict'])
+    diffusion_model.model.load_state_dict(ckpt['model_state_dict'])
     print("Load weight successfully!")
 
-    diffusion_model.eval()
+    diffusion_model.model.eval()
     predictions = []
     for i, cond in enumerate(conds):
         print(f"Starting prediction {i+1}/{len(conds)}")
