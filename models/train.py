@@ -60,7 +60,7 @@ def set_random_seed(
         torch.backends.cudnn.benchmark = True
 
 def get_physics_informed_loss(loss_type: str, *args, **kwargs):
-    if loss_type == 'naiver_stokes':
+    if loss_type == 'ns':
         return naiver_stokes_residual(*args, **kwargs)
     elif loss_type == 'burgers':
         return burgers_residual(*args, **kwargs)
@@ -127,11 +127,11 @@ class Trainer:
             'ema_model_state_dict': self.ema_model.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'scheduler_state_dict': self.scheduler.state_dict(),
-            }, f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss/ckpt.pt')
+            }, f'../ckpts/ddpm/{self.experiment}_{self.phyloss_weight:.2f}phyloss(ec)/ckpt.pt')
         print("Checkpoint saved")
 
     def load_checkpoint(self, initialize_lr: bool=False):
-        checkpoint = torch.load(f'./ckpts/{self.experiment}_{self.phyloss_weight:.2f}phyloss/ckpt.pt')
+        checkpoint = torch.load(f'./ckpts/ddpm/{self.experiment}_{self.phyloss_weight:.2f}phyloss(ec)/ckpt.pt')
         self.diffusion_model.model.load_state_dict(checkpoint['model_state_dict'])
         self.ema_model.model.load_state_dict(checkpoint['ema_model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
@@ -165,7 +165,7 @@ class Trainer:
                 if self.experiment == 'burgers':
                     phy_loss = get_physics_informed_loss(self.experiment, u=x_pred, visc=1e-2, dt=1e-2)
                 elif self.experiment == 'ns':
-                    phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next, visc=1e-3, dt=1e-3)
+                    phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next, visc=1e-3, dt=1e-3, w0=x)
                 elif self.experiment == 'darcy':
                     phy_loss = get_physics_informed_loss(self.experiment, a=x_pred, u=y)
                 loss = dn_loss + self.phyloss_weight * phy_loss
@@ -195,7 +195,7 @@ class Trainer:
                     if self.experiment == 'burgers':
                         phy_loss = get_physics_informed_loss(self.experiment, u=x_pred, visc=1e-2, dt=1e-2)
                     elif self.experiment == 'ns':
-                        phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next, visc=1e-3, dt=1e-3)
+                        phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next, visc=1e-3, dt=1e-3, w0=x)
                     elif self.experiment == 'darcy':
                         phy_loss = get_physics_informed_loss(self.experiment, a=x_pred, u=y)
                     loss = dn_loss + self.phyloss_weight * phy_loss
@@ -208,28 +208,28 @@ class Trainer:
                     x_pred = self.diffusion_model.sample(cond=y)
                     x_pred = x_pred.cpu().numpy().squeeze()
                     x = x.cpu().numpy().squeeze()
-                    # fig1, ax1 = plt.subplots(4, 5, figsize=(10, 8))
-                    # ax1 = ax1.flatten()
-                    # for i in range(20):
-                    #     ax1[i].imshow(x[i], cmap='jet')
-                    #     ax1[i].axis('off')
-                    # fig2, ax2 = plt.subplots(4, 5, figsize=(10, 8))
-                    # ax2 = ax2.flatten()
-                    # for i in range(20):
-                    #     ax2[i].imshow(x_pred[i], cmap='jet')
-                    #     ax2[i].axis('off')
-                    fig1, ax1 = plt.subplots(2, 2, figsize=(8, 8))
+                    fig1, ax1 = plt.subplots(4, 5, figsize=(10, 8))
                     ax1 = ax1.flatten()
-                    for i in range(4):
-                        im1 = ax1[i].imshow(x[i], cmap='jet')
+                    for i in range(20):
+                        ax1[i].imshow(x[i], cmap='jet')
                         ax1[i].axis('off')
-                    fig1.colorbar(im1, ax=ax1)
-                    fig2, ax2 = plt.subplots(2, 2, figsize=(8, 8))
+                    fig2, ax2 = plt.subplots(4, 5, figsize=(10, 8))
                     ax2 = ax2.flatten()
-                    for i in range(4):
-                        im2 = ax2[i].imshow(x_pred[i], cmap='jet')
+                    for i in range(20):
+                        ax2[i].imshow(x_pred[i], cmap='jet')
                         ax2[i].axis('off')
-                    fig2.colorbar(im2, ax=ax2) 
+                    # fig1, ax1 = plt.subplots(2, 2, figsize=(8, 8))
+                    # ax1 = ax1.flatten()
+                    # for i in range(4):
+                    #     im1 = ax1[i].imshow(x[i], cmap='jet')
+                    #     ax1[i].axis('off')
+                    # fig1.colorbar(im1, ax=ax1)
+                    # fig2, ax2 = plt.subplots(2, 2, figsize=(8, 8))
+                    # ax2 = ax2.flatten()
+                    # for i in range(4):
+                    #     im2 = ax2[i].imshow(x_pred[i], cmap='jet')
+                    #     ax2[i].axis('off')
+                    # fig2.colorbar(im2, ax=ax2) 
                     self.tb_writer.add_figure("Ground truth", fig1, epoch)
                     self.tb_writer.add_figure("Prediction", fig2, epoch)
 
@@ -238,33 +238,51 @@ class Trainer:
             
         self.tb_writer.close()
         print('Training finished!')
+        ckpt = torch.load(f'../ckpts/ddpm/{self.experiment}_{self.phyloss_weight:.2f}phyloss(ec)/ckpt.pt')
+        torch.save(ckpt['model_state_dict'], f'../ckpts/ddpm/{self.experiment}_{self.phyloss_weight:.2f}phyloss(ec)/ckpt_clean.pt')
 
 if __name__ == '__main__':
     args = parse.parse_args()
-    os.makedirs(f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss', exist_ok=True)
-    save_config(args, f'./ckpts/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
+    os.makedirs(f'../ckpts/ddpm/{args.experiment}_{args.phyloss_weight:.2f}phyloss(ec)', exist_ok=True)
+    save_config(args, f'../ckpts/ddpm/{args.experiment}_{args.phyloss_weight:.2f}phyloss(ec)')
 
-    model = Unet2D_Spatial(
+    # model = Unet2D_Spatial(
+    #     channels=1,
+    #     cond_channels=1,
+    #     channel_mults=(1, 2, 4, 8),
+    #     init_conv_channels=32,
+    #     init_conv_kernel_size=5
+    # )
+    # diffusion_model = GaussianDiffusion(
+    #     model=model,
+    #     sample_size=(1, 240, 240),
+    #     timesteps=800,
+    #     objective=args.train_obj,
+    #     physics_loss_weight=args.phyloss_weight
+    # )
+    model = Unet3D(
         channels=1,
         cond_channels=1,
-        channel_mults=(1, 2, 4, 8),
+        channel_mults=(1, 2, 4, 8, 16),
         init_conv_channels=32,
         init_conv_kernel_size=5
     )
     diffusion_model = GaussianDiffusion(
         model=model,
-        sample_size=(1, 240, 240),
-        timesteps=800,
+        sample_size=(1, 20, 64, 64),
+        timesteps=1000,
         objective=args.train_obj,
         physics_loss_weight=args.phyloss_weight
     )
     diffusion_model = diffusion_model.to(args.device_no)
 
-    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss')
+    tb_writer = SummaryWriter(log_dir=f'./logs/{args.experiment}_{args.phyloss_weight:.2f}phyloss(ec)')
+    train_dataset = NaiverStokes_Dataset("../data/ns_data_T20_v1e-03_N1800.mat")
+    test_dataset = NaiverStokes_Dataset("../data/ns_data_T20_v1e-03_N200.mat")
     # train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat", normalize=False)
     # test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat", normalize=False)
-    train_dataset = Darcys_Dataset('../data/darcy_data_r241_N1800.mat')
-    test_dataset = Darcys_Dataset('../data/darcy_data_r241_N200.mat')
+    # train_dataset = Darcys_Dataset('../data/darcy_data_r241_N1800.mat')
+    # test_dataset = Darcys_Dataset('../data/darcy_data_r241_N200.mat')
     trainer = Trainer(diffusion_model=diffusion_model, 
                       train_dataset=train_dataset,
                       test_dataset=test_dataset,

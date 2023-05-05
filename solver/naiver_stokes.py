@@ -146,6 +146,7 @@ a = torch.zeros(N, s//sub, s//sub)
 w_now = torch.zeros(N, s//sub, s//sub, record_steps)
 w_prev = torch.zeros(N, s//sub, s//sub, record_steps)
 w_next = torch.zeros(N, s//sub, s//sub, record_steps)
+w_complete = torch.zeros(N, s//sub, s//sub, total_steps//100)
 
 c = 0
 t0 =default_timer()
@@ -161,6 +162,7 @@ for j in range(N//bsize):
     w_now[c:(c+bsize),...] = sol_w[..., 1::record_interval]
     w_prev[c:(c+bsize),...] = sol_w[..., :-1:record_interval]
     w_next[c:(c+bsize),...] = sol_w[..., 2::record_interval]
+    w_complete[c:(c+bsize),...] = sol_w[..., ::100]
     # q[c:(c+bsize),...] = sol_q
     # v[c:(c+bsize),...] = sol_v
 
@@ -170,8 +172,9 @@ for j in range(N//bsize):
     print(f'Time elapsed: {default_timer() - t0:.2f} s')
     print('--'*20)
 
-scipy.io.savemat(f'../data/ns_data_T{T:.0f}_v{visc:.0e}_N{N}.mat', \
+scipy.io.savemat(f'../data/ns_data_T{T:.0f}_v{visc:.0e}_N{N}(complete).mat', \
                  mdict={'a': a.cpu().numpy(), 
                         'w': w_now.cpu().numpy(),
                         'w_prev': w_prev.cpu().numpy(),
-                        'w_next': w_next.cpu().numpy()})
+                        'w_next': w_next.cpu().numpy(),
+                        'w_complete': w_complete.cpu().numpy()})
