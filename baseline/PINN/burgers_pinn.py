@@ -171,10 +171,10 @@ class PINN:
         return loss
 
 if __name__ == '__main__':
-    n_test = 50
+    n_test = 21
     pinn = PINN()
 
-    for n_sample in range(4, n_test):
+    for n_sample in range(20, n_test):
         print(f"Start training {n_sample+1}th sample")
         xt_u, u_u, xt_f = create_pinn_data(u, u0, n_sample)
         pinn.reset(xt_u, u_u, xt_f)

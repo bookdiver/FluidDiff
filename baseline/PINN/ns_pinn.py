@@ -4,6 +4,7 @@ import torch.nn as nn
 from torch.autograd import grad
 import numpy as np
 from pyDOE import lhs
+from timeit import default_timer
 
 # data_path = '../../data/ns_data_T20_v1e-03_N200(complete).mat'
 data_path = '/home/gefan/FluidDiff/data/ns_data_T20_v1e-03_N200(complete).mat'
@@ -121,7 +122,7 @@ class PINN:
     def __init__(self):
         self.net = DNN(dim_in=3, 
                        dim_out=1, 
-                       n_nodes=(20, 20, 20, 20, 20, 20, 20)
+                       n_nodes=(40, 40, 40, 40, 40, 40, 40)
                     ).to(device)
 
         self.optimizer = None
@@ -139,8 +140,8 @@ class PINN:
         self.optimizer = torch.optim.LBFGS(
             self.net.parameters(),
             lr=1.0,
-            max_iter=50000,
-            max_eval=50000,
+            max_iter=30000,
+            max_eval=30000,
             history_size=50,
             tolerance_grad=1e-5,
             tolerance_change=1.0 * np.finfo(float).eps,
@@ -148,31 +149,30 @@ class PINN:
         )
         print("PINN initialized")
 
-    def f(self, xyt, visc=1e-3):
-        xyt = xyt.clone()
-        xyt.requires_grad = True
+    def f(self, xyt_f, visc=1e-3):
+        xyt_f = xyt_f.clone()
+        xyt_f.requires_grad = True
 
-        psi = self.net(xyt)
-        psi_xyt = grad(psi.sum(), xyt, create_graph=True)[0]
+        psi = self.net(xyt_f)
+        psi_xyt = grad(psi.sum(), xyt_f, create_graph=True)[0]
         psi_x = psi_xyt[:, 0:1]
         psi_y = psi_xyt[:, 1:2]
 
-        psi_xx = grad(psi_x.sum(), xyt, create_graph=True)[0][:, 0:1]
-        psi_yy = grad(psi_y.sum(), xyt, create_graph=True)[0][:, 1:2]
-
+        psi_xx = grad(psi_x.sum(), xyt_f, create_graph=True)[0][:, 0:1]
+        psi_yy = grad(psi_y.sum(), xyt_f, create_graph=True)[0][:, 1:2]
         u = psi_y
         v = -psi_x
         w = -(psi_xx + psi_yy)
 
-        w_xyt = grad(w.sum(), xyt, create_graph=True)[0]
+        w_xyt = grad(w.sum(), xyt_f, create_graph=True)[0]
         w_x = w_xyt[:, 0:1]
         w_y = w_xyt[:, 1:2]
         w_t = w_xyt[:, 2:3]
 
-        w_xx = grad(w_x.sum(), xyt, create_graph=True)[0][:, 0:1]
-        w_yy = grad(w_y.sum(), xyt, create_graph=True)[0][:, 1:2]
+        w_xx = grad(w_x.sum(), xyt_f, create_graph=True)[0][:, 0:1]
+        w_yy = grad(w_y.sum(), xyt_f, create_graph=True)[0][:, 1:2]
 
-        force = 0.1 * (torch.sin(2 * np.pi * (xyt[:, 0:1] + xyt[:, 1:2])) + torch.cos(2 * np.pi * (xyt[:, 0:1] + xyt[:, 1:2])))
+        force = 0.1 * (torch.sin(2 * np.pi * (xyt_f[:, 0:1] + xyt_f[:, 1:2])) + torch.cos(2 * np.pi * (xyt_f[:, 0:1] + xyt_f[:, 1:2])))
 
         f = w_t + u * w_x + v * w_y - visc * (w_xx + w_yy) - force
         return f
@@ -216,9 +216,11 @@ if __name__ == '__main__':
     pinn = PINN()
 
     for n_sample in range(n_test):
+        t_start = default_timer()
         print("-"*40)
         print(f"Start training {n_sample+1}th sample")
         xyt_u, w_u, xyt_f = create_pinn_data(w, w0, n_sample)
         pinn.reset(xyt_u, w_u, xyt_f)
         pinn.optimizer.step(pinn.closure)
         torch.save(pinn.net.state_dict(), save_name+f'_{n_sample}.pt')
+        print(f"Time elapsed: {default_timer() - t_start:.2f} s")
