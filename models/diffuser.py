@@ -295,29 +295,5 @@ class GaussianDiffusion(nn.Module):
         t = torch.randint(0, self.num_timesteps, (b, ), device=device).long()
         return self.p_losses(x0, t, *args, **kwargs)
 
-def test():
-    from FluidDiff.models.unet3d import Unet3D
-    eps_model = Unet3D(
-        channels=1,
-        cond_channels=1,
-        channel_mults=(1, 2, 4, 8),
-        init_conv_channels=32
-    )
-    diffuser = GaussianDiffusion(
-        model=eps_model,
-        sample_size=(1, 20, 64, 64),
-        timesteps=1000,
-        sampling_timesteps=100,
-    ).cuda()
-    x = torch.randn(2, 1, 20, 64, 64).cuda()
-    cond = torch.randn(2, 1, 64, 64).cuda()
-    # loss = diffuser(x0=x, cond=cond, lamb=0.1)
-    # print(loss)
-    sample = diffuser.sample(cond=cond)
-    print(sample.shape)
-
-if __name__ == '__main__':
-    test()
-
 
     

@@ -3,16 +3,13 @@ import torch
 from torch.utils.data import Dataset
 
 class Burgers_Dataset(Dataset):
-    def __init__(self, data_dir, normalize=False):
+    def __init__(self, data_dir):
         data = sio.loadmat(data_dir)
         to_tensor = lambda x: torch.from_numpy(x).unsqueeze(1).to(torch.float32)
         self.a = to_tensor(data['a'])
         self.u = to_tensor(data['u'])
         print(f"Loaded {len(self.a)} samples from {data_dir}")
         print(f"Shape of x: {self.u.shape}")
-        if normalize:
-            self.u = (self.u - self.u.min()) / (self.u.max() - self.u.min())
-            self.a = (self.a - self.a.min()) / (self.a.max() - self.a.min())
     
     def __len__(self):
         return len(self.a)
@@ -41,13 +38,11 @@ class NaiverStokes_Dataset(Dataset):
                 'y': self.a[idx]}
     
 class Darcys_Dataset(Dataset):
-    def __init__(self, data_dir, normalize=True):
+    def __init__(self, data_dir):
         data = sio.loadmat(data_dir)
-        to_tensor = lambda x: torch.from_numpy(x)[:, 1:, 1:].unsqueeze(1).to(torch.float32)
+        to_tensor = lambda x: torch.from_numpy(x).unsqueeze(1).to(torch.float32)
         self.a = to_tensor(data['coeff'])
         self.u = to_tensor(data['sol'])
-        if normalize:
-            self.a = (self.a - self.a.min()) / (self.a.max() - self.a.min())
 
         print(f"Loaded {len(self.a)} samples from {data_dir}")
         print(f"Shape of x: {self.u.shape}")
@@ -57,13 +52,3 @@ class Darcys_Dataset(Dataset):
     
     def __getitem__(self, idx):
         return {'x': self.a[idx], 'y': self.u[idx]}
-    
-
-if __name__ == "__main__":
-    data_dir = "../data/darcy_data_r241_N1800.mat"
-    # dataset = NaiverStokes_Dataset(data_dir)
-    dataset = Darcys_Dataset(data_dir)
-    print(dataset[0]['x'].shape)
-    print(dataset[0]['y'].shape)
-    # print(dataset[0]['x_prev'].shape)
-    # print(dataset[0]['x_next'].shape)
