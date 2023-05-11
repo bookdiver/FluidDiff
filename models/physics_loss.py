@@ -128,6 +128,7 @@ def Darcy_FDM(u, a, L=1):
     dx = L / (nx-1)
     dy = L / (ny-1)
 
+    # 2nd-order central difference
     ux = (u[:, 2:, 1:-1] - u[:, :-2, 1:-1]) / (2 * dx)
     uy = (u[:, 1:-1, 2:] - u[:, 1:-1, :-2]) / (2 * dy)
 
@@ -187,4 +188,7 @@ def Darcy_loss(u, a, a0=None):
     else:
         return lploss(Du, Du0)
 
-    
+
+def Darcy_mask(x):
+    x = 1 / (1 + torch.exp(-x))
+    return x * 9 + 3

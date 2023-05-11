@@ -322,20 +322,3 @@ class Unet2D_Spatial(nn.Module):
 
         x = torch.cat((x, r), dim = 1)
         return self.final_conv(x)
-
-
-if __name__ == '__main__':
-    x = torch.randn(4, 1, 240, 240)
-    y = torch.randn(4, 1, 240, 240)
-    time = torch.randn(4)
-    model = Unet2D_Spatial(
-        channels=1,
-        cond_channels=1,
-        channel_mults=(1, 2, 4, 8),
-        init_conv_channels=32,
-        init_conv_kernel_size=5
-    )
-    out = model(x, time, cond=y)
-    print(f"The number of parameters in the model is {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
-    print(out.shape)
-    # print(model)

@@ -54,7 +54,7 @@ class GaussianDiffusion(nn.Module):
                  objective: str='pred_noise',
                  min_snr_loss_weight: bool=False,
                  min_snr_gamma: float=5.,
-                 physics_loss_weight: float=0.0,
+                 output_mask: callable=None
                  ) -> None:
         super().__init__()
 
@@ -114,6 +114,7 @@ class GaussianDiffusion(nn.Module):
             register_buffer('loss_weight', maybe_clipped_snr)
 
         self.loss_type = loss_type
+        self.output_mask = output_mask
 
     
     def get_q_xt_x0_mean_variance(self, x0: torch.Tensor, t: torch.Tensor) -> tuple:      
@@ -167,6 +168,8 @@ class GaussianDiffusion(nn.Module):
     def get_p_sample_mean_variance(self, xt: torch.Tensor, t: torch.LongTensor, cond: torch.Tensor, clip_x0_pred: bool=True) -> tuple:
         preds = self.get_model_predictions(xt=xt, t=t, cond=cond)
         x0_pred = preds.x0_pred
+
+        x0_pred = self.output_mask(x0_pred) if exists(self.output_mask) else x0_pred
 
         if clip_x0_pred:
             x0_pred = torch.clamp(x0_pred, min=-1.0, max=1.0)
@@ -285,6 +288,8 @@ class GaussianDiffusion(nn.Module):
             raise NotImplementedError(f'Objective {self.objective} not implemented')
 
         model_output = self.model(xt, t, cond)
+
+        model_output = self.output_mask(model_output) if self.output_mask is not None else model_output
 
         loss = self.loss_fn(model_output, target)
         
