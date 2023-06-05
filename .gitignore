@@ -551,7 +551,7 @@ data
 logs
 ckpts
 assets
-new_assets
+baseline
 
 # PyCharm
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can

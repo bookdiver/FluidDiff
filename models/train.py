@@ -144,7 +144,7 @@ class Trainer:
 
                 x_pred, dn_loss = self.diffusion_model(x, cond=y)
                 if self.experiment == 'burgers':
-                    phy_loss = get_physics_informed_loss(self.experiment, u=x_pred)
+                    phy_loss = get_physics_informed_loss(self.experiment, u=x_pred, u0=x)
                 elif self.experiment == 'ns':
                     phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next)
                 elif self.experiment == 'darcy':
@@ -154,7 +154,7 @@ class Trainer:
                 self.optimizer.zero_grad()
                 loss.backward()
                 self.optimizer.step()
-                pbar_train.set_description(f'Train Epoch {epoch}/{self.train_epochs}, Avg Loss: {cum_train_loss / (i+1):.4f}')
+                pbar_train.set_description(f'Train Epoch {epoch}/{self.train_epochs}, Avg Loss: {cum_train_loss / (i+1):.4e}')
                 self.tb_writer.add_scalar('train/loss', loss.item(), epoch*len(self.train_dl)+i)
                 self.tb_writer.add_scalar('train/dn_loss', dn_loss.item(), epoch*len(self.train_dl)+i)
                 self.tb_writer.add_scalar('train/phy_loss', phy_loss.item(), epoch*len(self.train_dl)+i)
@@ -175,47 +175,47 @@ class Trainer:
                     x_pred, dn_loss = self.diffusion_model(x, cond=y)
 
                     if self.experiment == 'burgers':
-                        phy_loss = get_physics_informed_loss(self.experiment, u=x_pred)
+                        phy_loss = get_physics_informed_loss(self.experiment, u=x_pred, u0=x)
                     elif self.experiment == 'ns':
                         phy_loss = get_physics_informed_loss(self.experiment, w=x_pred, w_prev=x_prev, w_next=x_next)
                     elif self.experiment == 'darcy':
                         phy_loss = get_physics_informed_loss(self.experiment, a=x_pred, u=y, a0=x)
                     loss = dn_loss + self.gamma * phy_loss
                     cum_val_loss += loss.item()
-                    pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4f}')
+                    pbar_test.set_description(f'Val Epoch {epoch}/{self.train_epochs}, Loss: {cum_val_loss / (i+1):.4e}')
                     self.tb_writer.add_scalar('test/loss', loss.item(), epoch*len(self.test_dl)+i)
                     self.tb_writer.add_scalar('test/dn_loss', dn_loss.item(), epoch*len(self.test_dl)+i)
                     self.tb_writer.add_scalar('test/phy_loss', phy_loss.item(), epoch*len(self.test_dl)+i)
                 
                 if epoch % 20 == 0:
                     print(f"Sampling at epoch {epoch}")
-                    x_pred = self.diffusion_model.sample(cond=y[:8])
+                    x_pred = self.diffusion_model.sample(cond=y[:4])
                     x_pred = x_pred.detach().cpu().numpy().squeeze()
                     x = x.detach().cpu().numpy().squeeze()
-                    fig1, ax1 = plt.subplots(2, 4, figsize=(14, 6))
-                    ax1 = ax1.flatten()
-                    for i in range(8):
-                        im1 = ax1[i].imshow(x[i])
-                        ax1[i].axis('off')
-                    fig1.colorbar(im1, ax=ax1)
-                    fig2, ax2 = plt.subplots(2, 4, figsize=(14, 6))
-                    ax2 = ax2.flatten()
-                    for i in range(8):
-                        im2 = ax2[i].imshow(x_pred[i])
-                        ax2[i].axis('off')
-                    fig2.colorbar(im2, ax=ax2)
-                    # fig1, ax1 = plt.subplots(2, 2, figsize=(8, 8))
+                    # fig1, ax1 = plt.subplots(2, 4, figsize=(14, 6))
                     # ax1 = ax1.flatten()
-                    # for i in range(4):
-                    #     im1 = ax1[i].imshow(x[i], cmap='jet')
+                    # for i in range(8):
+                    #     im1 = ax1[i].imshow(x[i])
                     #     ax1[i].axis('off')
                     # fig1.colorbar(im1, ax=ax1)
-                    # fig2, ax2 = plt.subplots(2, 2, figsize=(8, 8))
+                    # fig2, ax2 = plt.subplots(2, 4, figsize=(14, 6))
                     # ax2 = ax2.flatten()
-                    # for i in range(4):
-                    #     im2 = ax2[i].imshow(x_pred[i], cmap='jet')
+                    # for i in range(8):
+                    #     im2 = ax2[i].imshow(x_pred[i])
                     #     ax2[i].axis('off')
-                    # fig2.colorbar(im2, ax=ax2) 
+                    # fig2.colorbar(im2, ax=ax2)
+                    fig1, ax1 = plt.subplots(2, 2, figsize=(8, 8))
+                    ax1 = ax1.flatten()
+                    for i in range(4):
+                        im1 = ax1[i].imshow(x[i], cmap='jet')
+                        ax1[i].axis('off')
+                    fig1.colorbar(im1, ax=ax1)
+                    fig2, ax2 = plt.subplots(2, 2, figsize=(8, 8))
+                    ax2 = ax2.flatten()
+                    for i in range(4):
+                        im2 = ax2[i].imshow(x_pred[i], cmap='jet')
+                        ax2[i].axis('off')
+                    fig2.colorbar(im2, ax=ax2) 
                     self.tb_writer.add_figure("Ground truth", fig1, epoch)
                     self.tb_writer.add_figure("Prediction", fig2, epoch)
 
@@ -232,20 +232,23 @@ if __name__ == '__main__':
     os.makedirs('../ckpts/ddpm/' + SAVE_NAME, exist_ok=True)
     save_config(args, '../ckpts/ddpm/' + SAVE_NAME)
 
-    model = Unet2D_Spatial(
+
+    model = Unet2D(
         channels=1,
         cond_channels=1,
         channel_mults=(1, 2, 4, 8),
         init_conv_channels=32,
         init_conv_kernel_size=5
     )
+
     diffusion_model = GaussianDiffusion(
         model=model,
-        sample_size=(1, 64, 64),
-        timesteps=600,
+        sample_size=(1, 100, 128),
+        timesteps=800,
         objective=args.train_obj,
-        output_mask=Darcy_mask
+        output_mask=None
     )
+
     # model = Unet3D(
     #     channels=1,
     #     cond_channels=1,
@@ -261,13 +264,29 @@ if __name__ == '__main__':
     #     physics_loss_weight=args.phyloss_weight
     # )
 
+    # model = Unet2D_Spatial(
+    #     channels=1,
+    #     cond_channels=1,
+    #     channel_mults=(1, 2, 4, 8),
+    #     init_conv_channels=32,
+    #     init_conv_kernel_size=5
+    # )
+    # diffusion_model = GaussianDiffusion(
+    #     model=model,
+    #     sample_size=(1, 64, 64),
+    #     timesteps=600,
+    #     objective=args.train_obj,
+    #     output_mask=Darcy_mask
+    # )
+
+
     tb_writer = SummaryWriter(log_dir=f'./logs/' + SAVE_NAME)
     # train_dataset = NaiverStokes_Dataset("../data/ns_data_T20_v1e-03_N1800.mat")
     # test_dataset = NaiverStokes_Dataset("../data/ns_data_T20_v1e-03_N200.mat")
-    # train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat", normalize=False)
-    # test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat", normalize=False)
-    train_dataset = Darcys_Dataset('../data/darcy_data_r64_N800.mat')
-    test_dataset = Darcys_Dataset('../data/darcy_data_r64_N200.mat')
+    train_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N1800.mat")
+    test_dataset = Burgers_Dataset("../data/burgers_data_Nt100_v1e-02_N200.mat")
+    # train_dataset = Darcys_Dataset('../data/darcy_data_r64_N800.mat')
+    # test_dataset = Darcys_Dataset('../data/darcy_data_r64_N200.mat')
     trainer = Trainer(diffusion_model=diffusion_model, 
                       train_dataset=train_dataset,
                       test_dataset=test_dataset,
