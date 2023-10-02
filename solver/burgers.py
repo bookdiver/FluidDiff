@@ -1,12 +1,13 @@
 import torch
-import math
+from scipy.io import savemat
+import matplotlib as mpl
+
+mpl.use('Agg')
+
+import matplotlib.pyplot as plt
 
 from random_field import GaussianRF, GRF_Mattern
 
-import scipy.io
-from tqdm import tqdm
-
-from timeit import default_timer
 
 class BurgersEq1D():
     def __init__(self,
@@ -26,13 +27,10 @@ class BurgersEq1D():
         self.x = x
         self.dx = x[1] - x[0]
         self.nu = nu
-        self.u = torch.zeros_like(x, device=device)
-        self.u0 = torch.zeros_like(self.u, device=device)
         self.dt = dt
         self.T = T
         self.t = 0
         self.i_t = 0
-        self.U = []
         self.device = device
         
     # All Central Differencing Functions are 4th order.  These are used to compute ann inputs.
@@ -53,13 +51,40 @@ class BurgersEq1D():
         return data_diff_ii
 
     def Dx(self, data):
-        data_dx = self.CD_i(data=data, axis=0, dx=self.dx)
+        data_dx = self.CD_i(data, axis=-1, dx=self.dx)
         return data_dx
 
     def Dxx(self, data):
-        data_dxx = self.CD_ii(data, axis=0, dx=self.dx)
+        data_dxx = self.CD_ii(data, axis=-1, dx=self.dx)
         return data_dxx
 
+    def dudt(self, u):
+        u_xx = self.Dxx(u)
+        u2 = u**2.0
+        u2_x = self.Dx(u2)
+        u_RHS = -0.5*u2_x + self.nu*u_xx
+        return u_RHS
+        
+    # def update_u(self, u, prev_k, step_frac):
+    #     u_new = u + step_frac*prev_k
+    #     return u_new
+
+    # def burgers_rk4(self, u):
+    #     k1 = self.dt * self.dudt(u)
+        
+    #     u1 = self.update_u(u, k1, step_frac=0.5)
+    #     k2 = self.dt * self.dudt(u1)
+
+    #     u2 = self.update_u(u, k2, step_frac=0.5)
+    #     k3 = self.dt * self.dudt(u2)
+
+    #     u3 = self.update_u(u, k3, step_frac=1.0)        
+    #     k4 = self.dt * self.dudt(u3)
+        
+    #     du = (k1 + 2.0*k2 + 2.0*k3 + k4)/6.0
+    #     u_next = u + du
+        
+    #     return u_next, du
     def burgers_calc_RHS(self, u):
         u_xx = self.Dxx(u)
         u2 = u**2.0
@@ -92,46 +117,46 @@ class BurgersEq1D():
         return u_new
 
     def burgers_driver(self, u0, save_interval=10):
-        self.u0 = u0
-        self.u = self.u0
+        u = u0.clone()
         self.i_t = 0
-        self.U = []
+        U = []
         
         if save_interval != 0 and self.i_t % save_interval == 0:
-            self.U.append(self.u)
+            U.append(u)
             
         # Compute equations
         while self.t < self.T:
 #             print(f"t:\t{self.t}")
-            self.u = self.burgers_rk4(self.u)
+            # u, du = self.burgers_rk4(u)
+            u = self.burgers_rk4(u)
             self.t += self.dt
             
             self.i_t += 1
             if save_interval != 0 and self.i_t % save_interval == 0:
-                self.U.append(self.u)
+                U.append(u)
 
         self.t = 0
 
-        return torch.stack(self.U).permute(1, 0, 2)
+        return torch.stack(U).permute(1, 0, 2)
 
 if __name__ == '__main__':
     device = torch.device('cuda:0')
 
     #Number of solutions to generate
-    N = 100
+    N = 1
 
     #Batch size
     bsize = N
 
     Nx = 4096
     T = 1.0
-    dt = 1/12800
-    dt_save = 1/128
+    dt = 1/10000
+    dt_save = 1/100
     save_interval = int(dt_save/dt)
-    visc = 0.1
+    visc = 0.01
 
-    GRF = GaussianRF(dim=1, size=Nx, alpha=2, tau=5, sigma=625, device=device)
-    # GRF = GRF_Mattern(1, Nx, length=1.0, nu=None, l=0.1, sigma=0.5, boundary="periodic", device=device)
+    GRF = GaussianRF(dim=1, size=Nx, alpha=2, tau=1, sigma=1, device=device)
+    # GRF = GRF_Mattern(1, Nx, length=1.0, nu=None, l=0.1, sigma=1, boundary="periodic", device=device)
 
     burgers = BurgersEq1D(Nx=Nx, T=T, dt=dt, nu=visc, device=device)
 
@@ -140,7 +165,6 @@ if __name__ == '__main__':
 
     c = 0
 
-    t0 = default_timer()
     for j in range(N//bsize):
         u0 = GRF.sample(bsize)
         a[c:c+bsize, :] = u0
@@ -152,10 +176,20 @@ if __name__ == '__main__':
         c += bsize
 
         print(f'Progress: {j+1} / {N//bsize}')
-        print(f'Elapsed time: {default_timer()-t0:.2f} s')
         print('--'*20)
 
-    scipy.io.savemat(f'../data/burgers_data_v{visc:.0e}_N{N}.mat', \
-                    mdict={'a': a.cpu().numpy(),
-                           'u': u.cpu().numpy()})
+    # savemat(f'../data/burgers_data_v{visc:.0e}_N{N}.mat', \
+    #                 mdict={'a': a.cpu().numpy(),
+    #                        'u': u.cpu().numpy()})
+    print(a.shape)
+    print(u.shape)
+    plt.figure()
+    plt.subplot(121)
+    plt.plot(a.squeeze().cpu())
+
+    plt.subplot(122)
+    plt.imshow(u.squeeze()[:, ::32].cpu(), cmap='jet')
+    plt.colorbar()
+
+    plt.savefig('./burgers_plot.png')
 

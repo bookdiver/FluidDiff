@@ -394,7 +394,8 @@ class Unet3D(nn.Module):
         attn_channels_per_head: int=32,
         init_conv_channels: int=None,
         init_conv_kernel_size: int=5,
-        use_sparse_linear_attn: bool=True,
+        use_spatial_attention: bool=True,
+        use_temporal_attention: bool=True,
         resnet_groups: int=8
     ):
         super().__init__()
@@ -461,8 +462,8 @@ class Unet3D(nn.Module):
             self.downs.append(nn.ModuleList([
                 block_klass_cond(channels_in, channels_out),
                 block_klass_cond(channels_out, channels_out),
-                Residual(PreNorm(channels_out, SpatialLinearAttention(channels_out, heads = attn_heads))) if use_sparse_linear_attn else nn.Identity(),
-                Residual(PreNorm(channels_out, temporal_attn(channels_out))),
+                Residual(PreNorm(channels_out, SpatialLinearAttention(channels_out, heads = attn_heads))) if use_spatial_attention else nn.Identity(),
+                Residual(PreNorm(channels_out, temporal_attn(channels_out))) if use_temporal_attention else nn.Identity(),
                 Downsample(channels_out) if not is_last else nn.Identity()
             ]))
 
@@ -471,8 +472,8 @@ class Unet3D(nn.Module):
 
         spatial_attn = EinopsToAndFrom('b c f h w', 'b f (h w) c', Attention(mid_channels, heads = attn_heads))
 
-        self.mid_spatial_attn = Residual(PreNorm(mid_channels, spatial_attn))
-        self.mid_temporal_attn = Residual(PreNorm(mid_channels, temporal_attn(mid_channels)))
+        self.mid_spatial_attn = Residual(PreNorm(mid_channels, spatial_attn)) if use_spatial_attention else nn.Identity()
+        self.mid_temporal_attn = Residual(PreNorm(mid_channels, temporal_attn(mid_channels))) if use_temporal_attention else nn.Identity()
 
         self.mid_block2 = block_klass_cond(mid_channels, mid_channels)
 
@@ -482,8 +483,8 @@ class Unet3D(nn.Module):
             self.ups.append(nn.ModuleList([
                 block_klass_cond(channels_out * 2, channels_in),
                 block_klass_cond(channels_in, channels_in),
-                Residual(PreNorm(channels_in, SpatialLinearAttention(channels_in, heads = attn_heads))) if use_sparse_linear_attn else nn.Identity(),
-                Residual(PreNorm(channels_in, temporal_attn(channels_in))),
+                Residual(PreNorm(channels_in, SpatialLinearAttention(channels_in, heads = attn_heads))) if use_spatial_attention else nn.Identity(),
+                Residual(PreNorm(channels_in, temporal_attn(channels_in))) if use_temporal_attention else nn.Identity(),
                 Upsample(channels_in) if not is_last else nn.Identity()
             ]))
 
@@ -553,15 +554,17 @@ def test():
                    cond_channels=1,
                    channel_mults=(1, 2, 4, 8, 16),
                    init_conv_channels=32,
-                   init_conv_kernel_size=5
+                   init_conv_kernel_size=5,
+                   use_spatial_attention=False,
+                   use_temporal_attention=False
     )
     print(f"the number of parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     # print(model)
-    # videos = torch.randn(2, 1, 100, 128)
-    # time = torch.randn(2)
-    # cond = torch.randn(2, 1, 128)
-    # logits = model(videos, time, cond)
-    # print(logits.shape)
+    inputs = torch.randn(2, 1, 20, 64, 64)
+    time = torch.randn(2)
+    cond = torch.randn(2, 1, 64, 64)
+    outputs = model(inputs, time, cond)
+    print(outputs.shape)
 
 if __name__ == '__main__':
     test()
